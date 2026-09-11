@@ -34,69 +34,12 @@ impl Store {
             .context("opening LMDB")?;
         let db = env.create_db(Some("records"), DatabaseFlags::empty())?;
         let meta = env.create_db(Some("metadata"), DatabaseFlags::empty())?;
-        let store = Self {
+        Ok(Self {
             env,
             db,
             meta,
             patterns: Mutex::new(None),
-        };
-        store.migrate_globstars()?;
-        Ok(store)
-    }
-
-    /// Convert persisted ** keys atomically; no record values or ordering modes are lost.
-    fn migrate_globstars(&self) -> Result<()> {
-        let txn = self.env.begin_ro_txn()?;
-        let mut cursor = txn.open_ro_cursor(self.db)?;
-        let old_keys: Vec<String> = cursor
-            .iter()
-            .filter_map(|(key, _)| {
-                let key = std::str::from_utf8(key).ok()?;
-                (key.contains("**") && !key.contains('(')).then(|| key.to_owned())
-            })
-            .collect();
-        drop(cursor);
-        drop(txn);
-        if old_keys.is_empty() {
-            return Ok(());
-        }
-        let mut txn = self.env.begin_rw_txn()?;
-        for old in old_keys {
-            if matches!(txn.get(self.db, &old), Err(lmdb::Error::NotFound)) {
-                continue;
-            }
-            let key = canonical(&old.replace("**", "(.+)"))?;
-            anyhow::ensure!(
-                matches!(txn.get(self.db, &key), Err(lmdb::Error::NotFound)),
-                "cannot migrate {old}: target {key} already exists"
-            );
-            let mut records = decode(&old, txn.get(self.db, &old)?)?;
-            for record in &mut records {
-                record.name = Name::root();
-            }
-            let mut message = Message::new(0, MessageType::Response, OpCode::Query);
-            message.answers = records;
-            let mut bytes = b"DNS1".to_vec();
-            bytes.extend(message.to_vec()?);
-            txn.put(self.db, &key, &bytes, WriteFlags::empty())?;
-            txn.del(self.db, &old, None)?;
-            for record in message.answers {
-                let old_mode = mode_key(&old, record.record_type());
-                if let Ok(mode) = txn.get(self.meta, &old_mode) {
-                    let mode = mode.to_vec();
-                    txn.put(
-                        self.meta,
-                        &mode_key(&key, record.record_type()),
-                        &mode,
-                        WriteFlags::empty(),
-                    )?;
-                    txn.del(self.meta, &old_mode, None)?;
-                }
-            }
-        }
-        self.bump_revision(&mut txn)?;
-        txn.commit()?;
-        Ok(())
+        })
     }
 
     /// Replace the address RRset of the same family, preserving other types.
