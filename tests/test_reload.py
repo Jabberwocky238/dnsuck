@@ -27,7 +27,7 @@ class ReloadTests(unittest.TestCase):
         self.env = dict(os.environ, TMPDIR=str(self.path))
         self.port = available_port()
         self.management_port = available_port()
-        self.settings = {"graphql": True, "listen": f"127.0.0.1:{self.management_port}",
+        self.settings = {"listen": f"127.0.0.1:{self.management_port}",
                          "dns": f"127.0.0.1:{self.port}", "database": "records"}
         self.process = None
         self.client = httpx.Client(trust_env=False, timeout=3)
@@ -77,17 +77,17 @@ class ReloadTests(unittest.TestCase):
         return method(dns.message.make_query("reload.test", "A"), "127.0.0.1", port=port or self.port, timeout=1)
 
     def test_file_and_flags_are_mutually_exclusive(self):
-        for args in [("--dns", "127.0.0.1:53"), ("--graphql",), ("--database", "records"),
+        for args in [("--dns", "127.0.0.1:53"), ("--database", "records"),
                      ("--listen", "127.0.0.1:3080"), ("put", "test", "192.0.2.1")]:
             result = self.run_cli("-c", str(self.config), *args)
             self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertNotEqual(self.run_cli("-c", str(self.config), "--reload").returncode, 0)
-        for content in ['unknown = true', 'graphql = "true"', 'graphql = [', 'graphql = true\ndoh = "127.0.0.1:8443"']:
+        for content in ['unknown = true', 'graphql = true', 'api-token = "removed"', 'listen = [', 'doh = "127.0.0.1:8443"']:
             self.config.write_text(content)
             self.assertNotEqual(self.run_cli("-c", str(self.config)).returncode, 0)
 
     def test_no_config_is_not_reloadable(self):
-        self.start(["--graphql", "--listen", f"127.0.0.1:{self.management_port}",
+        self.start(["--listen", f"127.0.0.1:{self.management_port}",
                     "--database", str(self.path / "records")])
         result = self.run_cli("--reload")
         self.assertNotEqual(result.returncode, 0)
@@ -112,12 +112,12 @@ class ReloadTests(unittest.TestCase):
         with self.assertRaises(OSError):
             socket.create_connection(("127.0.0.1", self.port), timeout=0.3)
         self.settings.pop("dns")
-        self.settings["api-token"] = "new-token"
+        self.management_port = available_port()
+        self.settings["listen"] = f"127.0.0.1:{self.management_port}"
         self.save()
         self.assertEqual(self.run_cli("--reload").returncode, 0)
         url = f"http://127.0.0.1:{self.management_port}/graphql"
-        self.assertEqual(self.client.post(url, json={"query":"{names}"}).status_code, 401)
-        self.assertEqual(self.client.post(url, json={"query":"{names}"}, headers={"Authorization":"Bearer new-token"}).status_code, 200)
+        self.assertEqual(self.client.post(url, json={"query":"{names}"}).status_code, 200)
         self.stop()
         self.start()
         self.assertEqual(self.query(dot_port, tcp=True).answer[0][0].address, "192.0.2.42")

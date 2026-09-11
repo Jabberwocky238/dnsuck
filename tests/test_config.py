@@ -38,20 +38,19 @@ class ConfigTests(unittest.TestCase):
         binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
         for proto in ("doh", "dot"):
             for extra in ([f"--{proto}-cert", "cert.pem"], [f"--{proto}-key", "key.pem"]):
-                result = subprocess.run([binary, "--graphql", f"--{proto}", "127.0.0.1:853",
+                result = subprocess.run([binary, f"--{proto}", "127.0.0.1:853",
                                          f"--{proto}-no-cert", *extra], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2, result.stderr)
 
-    def test_graphql_required_in_server_mode(self):
-        import tempfile
+    def test_removed_management_flags_and_default_listen(self):
         binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
-        with tempfile.TemporaryDirectory() as database:
-            result = subprocess.run([binary, "--database", database, "--dns", "127.0.0.1:0"],
-                                    capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--graphql is required", result.stderr)
+        for args in (["--graphql"], ["--api-token", "removed"]):
+            result = subprocess.run([binary, *args], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, result.stderr)
         result = subprocess.run([binary, "--help"], capture_output=True, text=True)
         self.assertIn("127.0.0.1:3080", result.stdout)
+        self.assertNotIn("--graphql", result.stdout)
+        self.assertNotIn("--api-token", result.stdout)
 
     def test_each_listener_independently(self):
         server = Server()
@@ -60,7 +59,7 @@ class ConfigTests(unittest.TestCase):
         for proto in ("dns", "doh", "dot", "doq"):
             with self.subTest(protocol=proto):
                 port = available_port()
-                args = [server.binary, "--graphql", "--listen", "127.0.0.1:0", "--database", str(server.path / "lmdb"),
+                args = [server.binary, "--listen", "127.0.0.1:0", "--database", str(server.path / "lmdb"),
                         f"--{proto}", f"127.0.0.1:{port}"]
                 if proto != "dns":
                     args += [f"--{proto}-cert", str(server.cert), f"--{proto}-key", str(server.path / "key.pem")]

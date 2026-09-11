@@ -18,7 +18,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use std::{path::Path, time::Duration};
-use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::watch};
 
 #[derive(Clone, Default)]
@@ -64,7 +63,6 @@ pub async fn answer(resolver: &Resolver, wire: Vec<u8>, peer: SocketAddr) -> Res
 pub struct Api {
     pub resolver: Arc<Resolver>,
     pub schema: ManagementSchema,
-    pub token: Option<String>,
     pub management: bool,
 }
 
@@ -142,17 +140,6 @@ pub async fn route(
             }
         }
         "/graphql" if api.management => {
-            let supplied = request
-                .headers()
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .unwrap_or("");
-            if let Some(token) = &api.token
-                && !bool::from(supplied.as_bytes().ct_eq(token.as_bytes()))
-            {
-                return error(StatusCode::UNAUTHORIZED, "invalid bearer token");
-            }
             if request.method() != Method::POST {
                 return error(StatusCode::METHOD_NOT_ALLOWED, "use POST");
             }

@@ -26,7 +26,4 @@ fi
 if [[ ! -f .local/dnssec/key.pem ]]; then
     openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out .local/dnssec/key.pem
 fi
-if [[ ! -f .local/api-token ]]; then
-    openssl rand -hex 32 > .local/api-token
-fi
 echo 'Development keys ready. Start with ./scripts/run-dev.sh'

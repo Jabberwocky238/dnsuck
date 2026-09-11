@@ -90,7 +90,7 @@ def main():
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
-        server_args = ["--graphql", "--listen", "127.0.0.1:0", "--database", str(Path(temp) / "lmdb"), "--dns", f"127.0.0.1:{port}"]
+        server_args = ["--listen", "127.0.0.1:0", "--database", str(Path(temp) / "lmdb"), "--dns", f"127.0.0.1:{port}"]
         start = time.perf_counter()
         loaded = write(binary, server_args, records)
         load_seconds = time.perf_counter() - start

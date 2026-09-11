@@ -19,10 +19,10 @@ bash <(curl -fsSL https://github.com/Jabberwocky238/dnsuck/releases/latest/downl
 ## Start
 
 ```bash
-dnsuck --graphql --dns 127.0.0.1:5353
+dnsuck --listen 127.0.0.1:3080 --dns 127.0.0.1:5353
 ```
 
-`--graphql` is required. Management uses plain HTTP at `http://127.0.0.1:3080/graphql`; change it with `--listen ADDRESS:PORT`. Add `--api-token TOKEN` for bearer authentication.
+Management uses plain HTTP without authentication at `http://127.0.0.1:3080/graphql`. Set its address with `--listen ADDRESS:PORT`; the default is `127.0.0.1:3080`.
 
 | Flag | Transport | Certificates |
 | --- | --- | --- |
@@ -38,7 +38,6 @@ Omitted listeners stay disabled. Behind a TLS-terminating proxy, use `--doh-no-c
 Create `dnsuck.toml` using [dnsuck.example.toml](dnsuck.example.toml):
 
 ```toml
-graphql = true
 listen = "127.0.0.1:3080"
 database = "data/lmdb"
 dns = "127.0.0.1:5353"
@@ -66,7 +65,7 @@ cmd del app.test A
 cmd batch --item "set,app.test,A,192.0.2.20" --item "get,app.test,A"
 ```
 
-`cmd` defaults to the management URL above; use `--endpoint URL` and `--token TOKEN` as needed. `set` replaces one RRset, preserving other types; TTL defaults to 300. `--raw` accepts base64 wire RDATA. Batch CSV items run sequentially without rollback of earlier writes.
+`cmd` defaults to the management URL above; use `--endpoint URL` as needed. `set` replaces one RRset, preserving other types; TTL defaults to 300. `--raw` accepts base64 wire RDATA. Batch CSV items run sequentially without rollback of earlier writes.
 
 GraphQL supports `records(name, recordType)`, `names(prefix, after, limit)`, atomic `upsert(records)`, and `delete(name, recordType)`. Record inputs contain `name`, `recordType`, `ttl`, and exactly one of `data` or `rdataBase64`.
 

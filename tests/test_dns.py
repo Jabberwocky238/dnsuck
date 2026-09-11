@@ -29,7 +29,7 @@ class DnsIntegration(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             cls.port = sock.getsockname()[1]
-        cls.args = ["--graphql", "--listen", "127.0.0.1:0", "--database", cls.temp.name, "--dns", f"127.0.0.1:{cls.port}"]
+        cls.args = ["--listen", "127.0.0.1:0", "--database", cls.temp.name, "--dns", f"127.0.0.1:{cls.port}"]
         cls.put("example.test", "192.0.2.10", 60)
         cls.put("example.test", "2001:db8::10", 120)
         cls.put("v4.test", "192.0.2.20", 30)

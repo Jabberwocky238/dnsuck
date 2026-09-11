@@ -15,8 +15,6 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:3080/graphql", global = true)]
     endpoint: String,
     #[arg(long, global = true)]
-    token: Option<String>,
-    #[arg(long, global = true)]
     ca_cert: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -48,7 +46,6 @@ enum Command {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let token = args.token;
     let url = reqwest::Url::parse(&args.endpoint).context("invalid API endpoint")?;
     anyhow::ensure!(
         matches!(url.scheme(), "http" | "https"),
@@ -69,7 +66,7 @@ fn main() -> Result<()> {
     let client = client.build()?;
     let mut results = Vec::with_capacity(commands.len());
     for (index, command) in commands.into_iter().enumerate() {
-        let result = execute(&client, &url, token.as_deref(), command).with_context(|| {
+        let result = execute(&client, &url, command).with_context(|| {
             if is_batch {
                 format!(
                     "batch item {} failed; earlier items have already completed",
@@ -93,7 +90,6 @@ fn main() -> Result<()> {
 fn execute(
     client: &reqwest::blocking::Client,
     url: &reqwest::Url,
-    token: Option<&str>,
     command: Command,
 ) -> Result<Value> {
     let (query, variables) = match command {
@@ -128,10 +124,6 @@ fn execute(
         Command::Batch { .. } => anyhow::bail!("nested batches are not supported"),
     };
     let request = client.post(url.clone());
-    let request = match token {
-        Some(token) => request.bearer_auth(token),
-        None => request,
-    };
     let result: Value = request
         .json(&json!({"query":query,"variables":variables}))
         .send()

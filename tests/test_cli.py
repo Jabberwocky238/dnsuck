@@ -13,8 +13,8 @@ class CLITests(unittest.TestCase):
         cls.addClassCleanup(cls.server.close)
         cls.binary = os.environ["DNS_TEST_CLI"]
 
-    def cli(self, *args, token=None, ca=True):
-        options = ["--endpoint", self.server.graphql_url + "/graphql", "--token", token or self.server.token]
+    def cli(self, *args, ca=True):
+        options = ["--endpoint", self.server.graphql_url + "/graphql"]
         if ca:
             options.extend(["--ca-cert", str(self.server.cert)])
         return subprocess.run([self.binary, *options, *args], text=True, capture_output=True, timeout=15)
@@ -25,7 +25,6 @@ class CLITests(unittest.TestCase):
         self.assertIn("<COMMAND>", result.stdout)
         self.assertIn("<DOMAIN> <RECORD_TYPE>", self.cli("get", "--help").stdout)
         self.assertIn("<DOMAIN> <RECORD_TYPE> <VALUE>", self.cli("set", "--help").stdout)
-        self.assertNotIn(self.server.token, result.stdout)
         for args in [("get", "cli.test"), ("set", "cli.test", "A"),
                      ("get", "cli.test", "A", "extra"), ("delete", "cli.test", "A"),
                      ("set", "cli.test", "A", "192.0.2.1", "--ttl", "invalid")]:
@@ -60,8 +59,8 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(json.loads(self.cli("get", "raw.test", "TYPE65280").stdout)["records"]), 1)
 
-    def test_auth_and_graphql_failures_return_nonzero(self):
-        self.assertNotEqual(self.cli("get", "cli.test", "A", token="wrong").returncode, 0)
+    def test_graphql_failures_return_nonzero(self):
+        self.assertEqual(self.cli("get", "cli.test", "A", "--token", "removed").returncode, 2)
         self.assertEqual(self.cli("get", "cli.test", "A", ca=False).returncode, 0)
         self.assertNotEqual(self.cli("get", "cli.test", "INVALID").returncode, 0)
         self.assertNotEqual(self.cli("set", "cli.test", "A", "invalid").returncode, 0)

@@ -37,7 +37,7 @@ def available_port():
 
 
 class Server:
-    def __init__(self, signed=False, management=True, encrypted_dns=False, management_only=False, proxy=False):
+    def __init__(self, signed=False, encrypted_dns=False, management_only=False, proxy=False):
         self.temp = tempfile.TemporaryDirectory(prefix="dns-web-test-")
         self.path = Path(self.temp.name)
         self.process = None
@@ -48,7 +48,6 @@ class Server:
         self.management_port = available_port()
         self.dot_port = available_port()
         self.doq_port = available_port()
-        self.token = "integration-test-management-token"
         self.signing_key = ec.generate_private_key(ec.SECP256R1())
         key_bytes = self.signing_key.private_bytes(serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
@@ -66,11 +65,11 @@ class Server:
             .sign(self.signing_key, hashes.SHA256()))
         self.cert = self.path / "cert.pem"
         self.cert.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-        self.args = ["--graphql", "--listen", f"127.0.0.1:{self.management_port}", "--database", str(self.path / "lmdb"), "--dns", f"127.0.0.1:{self.port}",
+        self.args = ["--listen", f"127.0.0.1:{self.management_port}", "--database", str(self.path / "lmdb"), "--dns", f"127.0.0.1:{self.port}",
                      "--doh", f"127.0.0.1:{self.https_port}", "--doh-cert", str(self.cert),
                      "--doh-key", str(self.path / "key.pem")]
         if management_only:
-            self.args = ["--graphql", "--listen", f"127.0.0.1:{self.management_port}",
+            self.args = ["--listen", f"127.0.0.1:{self.management_port}",
                          "--database", str(self.path / "lmdb")]
         if encrypted_dns:
             for proto, port in [("dot", self.dot_port), ("doq", self.doq_port)]:
@@ -83,8 +82,6 @@ class Server:
                         index = self.args.index(flag)
                         del self.args[index:index + 2]
                     self.args.append(f"--{proto}-no-cert")
-        if management:
-            self.args.extend(["--api-token", self.token])
         if signed:
             self.args.extend(["--dnssec-zone", "secure.test.", "--dnssec-key-file", str(self.path / "key.pem")])
         write(self.binary, self.args, INITIAL_RECORDS)
@@ -137,9 +134,8 @@ class Server:
         finally:
             self.temp.cleanup()
 
-    def graphql(self, query, variables=None, token=True):
-        headers = {"Authorization": f"Bearer {self.token}"} if token else {}
-        return self.client.post(self.graphql_url + "/graphql", headers=headers,
+    def graphql(self, query, variables=None):
+        return self.client.post(self.graphql_url + "/graphql",
                                 json={"query": query, "variables": variables or {}})
 
     def upsert(self, records):

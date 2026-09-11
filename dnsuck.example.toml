@@ -1,7 +1,6 @@
 # Start: dnsuck -c dnsuck.toml
 # Apply edits to the running config-file instance: dnsuck --reload
 # Do not combine -c with other configuration flags.
-graphql = true
 listen = "127.0.0.1:3080"
 database = "data/lmdb"
 dns = "127.0.0.1:5353"
@@ -20,6 +19,5 @@ dns = "127.0.0.1:5353"
 # doq-cert = "cert.pem"
 # doq-key = "key.pem"
 
-# api-token = "your-management-token"
 # dnssec-zone = "secure.test."
 # dnssec-key-file = "dnssec-key.pem"

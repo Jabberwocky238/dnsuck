@@ -28,10 +28,10 @@ use tokio::{
 )]
 pub struct Config {
     /// Read configuration exclusively from a TOML file.
-    #[arg(short = 'c', long = "config", value_name = "PATH", conflicts_with_all = ["dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "graphql", "listen", "api_token", "dnssec_zone", "dnssec_key_file"], global = true)]
+    #[arg(short = 'c', long = "config", value_name = "PATH", conflicts_with_all = ["dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file"], global = true)]
     pub config: Option<PathBuf>,
     /// Reload the running config-file instance for this user.
-    #[arg(long, conflicts_with_all = ["config", "dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "graphql", "listen", "api_token", "dnssec_zone", "dnssec_key_file"], global = true)]
+    #[arg(long, conflicts_with_all = ["config", "dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file"], global = true)]
     pub reload: bool,
     /// Enable UDP/TCP DNS, at the specified address and port.
     #[arg(long, value_name = "ADDRESS:PORT", global = true)]
@@ -75,9 +75,6 @@ pub struct Config {
     pub doq_cert: Option<PathBuf>,
     #[arg(long, requires = "doq", global = true)]
     pub doq_key: Option<PathBuf>,
-    /// Enable the required GraphQL management API (server mode).
-    #[arg(long, global = true)]
-    pub graphql: bool,
     /// Management HTTP bind address.
     #[arg(
         long,
@@ -86,8 +83,6 @@ pub struct Config {
         global = true
     )]
     pub listen: SocketAddr,
-    #[arg(long, global = true)]
-    pub api_token: Option<String>,
     #[arg(long, requires = "dnssec_key_file", global = true)]
     pub dnssec_zone: Option<String>,
     #[arg(long, requires = "dnssec_zone", global = true)]
@@ -130,7 +125,7 @@ impl Config {
         let mut args = vec![std::ffi::OsString::from("dnsuck")];
         for (name, value) in values {
             let flag = name.replace('_', "-");
-            let boolean = matches!(flag.as_str(), "graphql" | "doh-no-cert" | "dot-no-cert");
+            let boolean = matches!(flag.as_str(), "doh-no-cert" | "dot-no-cert");
             let file = matches!(
                 flag.as_str(),
                 "database"
@@ -146,7 +141,7 @@ impl Config {
                 && !file
                 && !matches!(
                     flag.as_str(),
-                    "dns" | "doh" | "dot" | "doq" | "listen" | "api-token" | "dnssec-zone"
+                    "dns" | "doh" | "dot" | "doq" | "listen" | "dnssec-zone"
                 )
             {
                 bail!("unknown configuration key: {name}");
@@ -175,17 +170,6 @@ impl Config {
         let mut config = Self::try_parse_from(args).context("invalid TOML settings")?;
         config.config = Some(path);
         Ok(config)
-    }
-
-    pub fn validate_server(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.graphql, "--graphql is required in server mode");
-        anyhow::ensure!(
-            self.api_token
-                .as_ref()
-                .is_none_or(|token| !token.is_empty()),
-            "API token must not be empty"
-        );
-        Ok(())
     }
 }
 
@@ -268,7 +252,6 @@ pub struct Prepared {
 impl Prepared {
     /// Validate and load all key material before disturbing the current listeners.
     pub async fn new(config: Config, store: Arc<Store>) -> Result<Self> {
-        config.validate_server()?;
         let signed = config
             .dnssec_zone
             .as_ref()
@@ -411,11 +394,6 @@ impl Running {
         let api = Arc::new(crate::doh::Api {
             resolver: prepared.resolver.clone(),
             schema: crate::graphql::schema(prepared.resolver.clone()),
-            token: if management {
-                prepared.config.api_token.clone()
-            } else {
-                None
-            },
             management,
         });
         self.http.spawn(crate::doh::serve(

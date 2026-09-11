@@ -11,11 +11,11 @@ class GraphQLTests(unittest.TestCase):
         cls.server = Server()
         cls.addClassCleanup(cls.server.close)
 
-    def test_authentication_and_http_errors(self):
-        self.assertEqual(self.server.graphql("{names}", token=False).status_code, 401)
+    def test_unauthenticated_management_and_http_errors(self):
+        self.assertEqual(self.server.graphql("{names}").status_code, 200)
         result = self.server.client.post(self.server.graphql_url + "/graphql", headers={"Authorization":"Bearer wrong"}, json={"query":"{names}"})
-        self.assertEqual(result.status_code, 401)
-        headers = {"Authorization": f"Bearer {self.server.token}"}
+        self.assertEqual(result.status_code, 200)
+        headers = {}
         self.assertEqual(self.server.client.get(self.server.graphql_url + "/graphql", headers=headers).status_code, 405)
         self.assertEqual(self.server.client.post(self.server.graphql_url + "/graphql", headers=headers, content=b"bad").status_code, 415)
         headers["content-type"] = "application/json"
@@ -51,15 +51,15 @@ class GraphQLTests(unittest.TestCase):
 
     def test_routes_are_separate(self):
         response = self.server.client.post(self.server.url + "/graphql",
-            headers={"Authorization": f"Bearer {self.server.token}"}, json={"query": "{names}"})
+            json={"query": "{names}"})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(self.server.client.get(self.server.graphql_url + "/dns-query").status_code, 404)
 
     def test_management_only_without_certificates(self):
-        server = Server(management=False, management_only=True)
+        server = Server(management_only=True)
         try:
             self.assertFalse(any("cert" in arg or "key" in arg for arg in server.args))
-            response = server.graphql("{names}", token=False)
+            response = server.graphql("{names}")
             self.assertEqual(response.status_code, 200)
             self.assertIn("secure.test.", response.json()["data"]["names"])
         finally:
