@@ -1,5 +1,5 @@
+use crate::dnslogic::resolver::Resolver;
 use crate::graphql::ManagementSchema;
-use crate::resolver::Resolver;
 use actix_web::{
     App, HttpRequest, HttpResponse, HttpServer,
     http::{Method, StatusCode},

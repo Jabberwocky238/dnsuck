@@ -303,7 +303,7 @@ fn persisted_double_stars_migrate_atomically_with_modes() -> anyhow::Result<()> 
             assert_eq!(store.revision()?, 8);
             assert_eq!(
                 store.modes()?[&(new.into(), 1)],
-                dnsuck::records::OrderMode::Lb
+                dnsuck::dnslogic::records::OrderMode::Lb
             );
         }
     }

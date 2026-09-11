@@ -75,7 +75,7 @@ impl RequestHandler for DnsHandler {
 
 pub struct Resolver {
     pub store: Arc<Store>,
-    pub signed: Option<Arc<crate::dnssec::SignedZone>>,
+    pub signed: Option<Arc<crate::dnslogic::dnssec::SignedZone>>,
     pub ordering: Arc<Ordering>,
 }
 
@@ -160,7 +160,7 @@ impl hickory_server::server::RequestHandler for SharedResolver {
     }
 }
 
-use crate::records::{OrderMode, OrderModes};
+use crate::dnslogic::records::{OrderMode, OrderModes};
 use hickory_server::{
     net::{NetError, xfer::Protocol},
     proto::{
@@ -222,7 +222,7 @@ impl Ordering {
         let mut groups: BTreeMap<(String, u16), Vec<usize>> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
             let key = (
-                crate::records::name_text(&record.name).to_ascii_lowercase(),
+                crate::dnslogic::records::name_text(&record.name).to_ascii_lowercase(),
                 u16::from(record.record_type()),
             );
             let source = (

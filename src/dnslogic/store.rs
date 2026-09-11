@@ -1,4 +1,4 @@
-use crate::records::{
+use crate::dnslogic::records::{
     OrderMode, OrderModes, StoredRecord, canonical, is_pattern, mode_key, parse_name, pattern,
 };
 use anyhow::{Context, Result};

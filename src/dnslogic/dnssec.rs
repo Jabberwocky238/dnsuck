@@ -1,4 +1,4 @@
-use crate::{Store, records::canonical};
+use crate::{Store, dnslogic::records::canonical};
 use anyhow::{Context, Result};
 use hickory_server::{
     dnssec::NxProofKind,
@@ -55,10 +55,10 @@ impl SignedZone {
         let (revision, stored) = store.snapshot()?;
         let templates = stored
             .iter()
-            .any(|record| crate::records::is_pattern(&record.key));
+            .any(|record| crate::dnslogic::records::is_pattern(&record.key));
         let records = stored
             .into_iter()
-            .filter(|record| !crate::records::is_pattern(&record.key))
+            .filter(|record| !crate::dnslogic::records::is_pattern(&record.key))
             .map(|record| record.record)
             .collect();
         let catalog = self.build(revision, records, templates)?;

@@ -1,11 +1,10 @@
 use crate::{
     Store,
-    dnssec::SignedZone,
-    resolver::{Resolver, SharedResolver},
+    dnslogic::{dnssec::SignedZone, resolver::Resolver},
+    transport::Running,
 };
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
-use hickory_server::Server;
 use std::{
     net::{IpAddr, SocketAddr},
     os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
@@ -15,9 +14,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, UdpSocket, UnixListener, UnixStream},
-    sync::watch,
-    task::JoinSet,
+    net::{UnixListener, UnixStream},
 };
 
 #[derive(Parser, Clone)]
@@ -244,15 +241,15 @@ pub async fn read_reload_request(stream: &mut UnixStream) -> Result<()> {
     Ok(())
 }
 
-type Tls = Arc<rustls::ServerConfig>;
+pub(crate) type Tls = Arc<rustls::ServerConfig>;
 
 #[derive(Clone)]
 pub struct Prepared {
     pub config: Config,
-    resolver: Arc<Resolver>,
-    doh: Option<Tls>,
-    dot: Option<Tls>,
-    doq: Option<Tls>,
+    pub(crate) resolver: Arc<Resolver>,
+    pub(crate) doh: Option<Tls>,
+    pub(crate) dot: Option<Tls>,
+    pub(crate) doq: Option<Tls>,
 }
 
 impl Prepared {
@@ -272,13 +269,15 @@ impl Prepared {
                 .map(Arc::new)
             })
             .transpose()?;
-        let ordering = Arc::new(crate::resolver::Ordering::load(config.mmdb.as_deref())?);
+        let ordering = Arc::new(crate::dnslogic::resolver::Ordering::load(
+            config.mmdb.as_deref(),
+        )?);
         anyhow::ensure!(
             ordering.has_geo()
                 || !store
                     .modes()?
                     .values()
-                    .any(|mode| *mode == crate::records::OrderMode::Geo),
+                    .any(|mode| *mode == crate::dnslogic::records::OrderMode::Geo),
             "geo record ordering requires --mmdb PATH"
         );
         let resolver = Arc::new(Resolver {
@@ -294,7 +293,7 @@ impl Prepared {
                     alpn: &[&[u8]],
                     quic: bool| {
             if address.is_some() && !no_cert {
-                crate::doh::server_config(
+                crate::transport::doh::server_config(
                     cert.as_deref().expect("validated cert"),
                     key.as_deref().expect("validated key"),
                     alpn,
@@ -336,108 +335,6 @@ impl Prepared {
             dot,
             doq,
         })
-    }
-}
-
-pub struct Running {
-    server: Server<SharedResolver>,
-    http: JoinSet<Result<()>>,
-    shutdown: watch::Sender<bool>,
-    has_dns: bool,
-}
-
-impl Running {
-    pub async fn start(prepared: &Prepared) -> Result<Self> {
-        let (shutdown, _) = watch::channel(false);
-        let config = &prepared.config;
-        let mut running = Self {
-            server: Server::new(SharedResolver(prepared.resolver.clone())),
-            http: JoinSet::new(),
-            shutdown,
-            has_dns: config.dns.is_some() || config.dot.is_some() || config.doq.is_some(),
-        };
-        if let Err(error) = running.bind(prepared).await {
-            running.stop().await.context("cleaning up failed startup")?;
-            return Err(error);
-        }
-        Ok(running)
-    }
-
-    async fn bind(&mut self, prepared: &Prepared) -> Result<()> {
-        let config = &prepared.config;
-        if let Some(address) = config.dns {
-            let udp = UdpSocket::bind(address).await.context("binding DNS UDP")?;
-            let address = udp.local_addr()?;
-            let tcp = TcpListener::bind(address)
-                .await
-                .context("binding DNS TCP")?;
-            self.server.register_socket(udp);
-            self.server
-                .register_listener(tcp, Duration::from_secs(10), 16);
-            println!("DNS listening on {address} (UDP/TCP)");
-        }
-        if let Some(address) = config.dot {
-            crate::dot::register(&mut self.server, address, prepared.dot.clone()).await?;
-        }
-        if let Some(address) = config.doq {
-            crate::doq::register(
-                &mut self.server,
-                address,
-                prepared.doq.clone().expect("validated QUIC TLS"),
-            )
-            .await?;
-        }
-        if let Some(address) = config.doh {
-            let listener = TcpListener::bind(address).await.context("binding DoH")?;
-            println!("DoH listening on {} (/dns-query)", listener.local_addr()?);
-            self.http_listener(listener, prepared.doh.clone(), prepared, false)?;
-        }
-        let listener = TcpListener::bind(config.listen)
-            .await
-            .context("binding management HTTP")?;
-        println!(
-            "GraphQL listening on http://{}/graphql",
-            listener.local_addr()?
-        );
-        self.http_listener(listener, None, prepared, true)?;
-        Ok(())
-    }
-
-    fn http_listener(
-        &mut self,
-        listener: TcpListener,
-        tls: Option<Tls>,
-        prepared: &Prepared,
-        management: bool,
-    ) -> Result<()> {
-        let api = Arc::new(crate::doh::Api {
-            resolver: prepared.resolver.clone(),
-            schema: crate::graphql::schema(prepared.resolver.clone()),
-            management,
-        });
-        self.http.spawn(crate::doh::serve(
-            listener,
-            tls,
-            api,
-            self.shutdown.subscribe(),
-        )?);
-        Ok(())
-    }
-
-    pub async fn wait(&mut self) -> Result<()> {
-        tokio::select! {
-            result = self.server.block_until_done(), if self.has_dns => result.context("DNS server stopped"),
-            result = self.http.join_next() => result.context("HTTP server missing")?.context("HTTP task failed")?,
-        }
-    }
-
-    pub async fn stop(&mut self) -> Result<()> {
-        let _ = self.shutdown.send(true);
-        self.server.shutdown_gracefully().await?;
-        while let Some(task) = self.http.join_next().await {
-            task??;
-        }
-        Ok(())
     }
 }
 

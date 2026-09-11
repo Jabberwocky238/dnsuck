@@ -1,4 +1,7 @@
-use crate::{RecordInput, decode_inputs, records::OrderMode, resolver::Resolver};
+use crate::{
+    RecordInput, decode_inputs,
+    dnslogic::{records::OrderMode, resolver::Resolver},
+};
 use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
 use hickory_server::proto::rr::RecordType;
 use std::sync::Arc;
@@ -21,8 +24,8 @@ pub struct DnsRecord {
     data: String,
     mode: Option<OrderMode>,
 }
-impl From<crate::records::StoredRecord> for DnsRecord {
-    fn from(record: crate::records::StoredRecord) -> Self {
+impl From<crate::dnslogic::records::StoredRecord> for DnsRecord {
+    fn from(record: crate::dnslogic::records::StoredRecord) -> Self {
         Self {
             name: record.key.clone(),
             record_type: domain::base::iana::Rtype::from(u16::from(record.record_type()))
@@ -143,7 +146,7 @@ impl Mutation {
         let resolver = ctx.data::<Arc<Resolver>>()?.clone();
         let kind = record_type.as_deref().map(kind).transpose()?;
         if let Some(signed) = &resolver.signed
-            && crate::records::canonical(&name)? == signed.origin.to_ascii()
+            && crate::dnslogic::records::canonical(&name)? == signed.origin.to_ascii()
             && kind.is_none_or(|k| matches!(k, RecordType::SOA | RecordType::NS))
         {
             return Err("cannot delete the configured signed zone's apex SOA or NS".into());

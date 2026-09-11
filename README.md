@@ -86,7 +86,7 @@ DNSSEC uses `--dnssec-zone DOMAIN --dnssec-key-file PATH` with an ECDSA P-256 PK
 
 ## Debug
 
-`dnsuckd --help` and `dnsuck --help` show the embedded version, UTC build time, and Git commit; `--version` also includes them.
+`dnsuckd --help` and `dnsuck --help` show the embedded version, UTC build time, and Git commit; `--version` also includes them. `src/transport/` owns DNS/DoH/DoT/DoQ listeners and their lifecycle; `src/dnslogic/` owns resolution, records, DNSSEC, and LMDB. Configuration and the GraphQL management schema remain in `src/config.rs` and `src/graphql.rs`.
 
 ```bash
 ./doctor.sh                              # Prepare static LMDB and Country MMDB
