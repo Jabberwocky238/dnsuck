@@ -1,0 +1,75 @@
+name: Tagged release
+on:
+  push:
+    tags: ['*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
+  build:
+    needs: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy && rustup default stable
+      - name: Install native tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3-venv
+      - run: ./doctor.sh
+      - run: cargo build --release --workspace --locked
+      - name: Package binaries
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: ./scripts/package-release.sh "$RELEASE_TAG" "$RELEASE_TARGET" dist/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dnsuck-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dnsuck-*
+          path: dist/release
+          merge-multiple: true
+      - name: Prepare installer
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          source = Path('install.sh').read_text()
+          Path('dist/release/install.sh').write_text(re.sub(r"^repository='[^']*'$", "repository='" + os.environ['GITHUB_REPOSITORY'] + "'", source, flags=re.MULTILINE))
+          PY
+          chmod +x dist/release/install.sh
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/release/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/release/* --verify-tag --generate-notes
+          fi

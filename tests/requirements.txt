@@ -1,0 +1,1 @@
+dnspython[dnssec,doh,doq]==2.8.0

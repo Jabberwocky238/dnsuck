@@ -1,0 +1,25 @@
+# Start: dnsuck -c dnsuck.toml
+# Apply edits to the running config-file instance: dnsuck --reload
+# Do not combine -c with other configuration flags.
+graphql = true
+listen = "127.0.0.1:3080"
+database = "data/lmdb"
+dns = "127.0.0.1:5353"
+
+# Omitted DNS transports remain disabled. Paths are relative to this file.
+# doh = "127.0.0.1:8443"
+# doh-cert = "cert.pem"
+# doh-key = "key.pem"
+# Or use doh-no-cert = true behind a TLS-terminating proxy.
+
+# dot = "127.0.0.1:853"
+# dot-no-cert = true
+# Or use dot-cert / dot-key for local TLS termination.
+
+# doq = "127.0.0.1:853"
+# doq-cert = "cert.pem"
+# doq-key = "key.pem"
+
+# api-token = "your-management-token"
+# dnssec-zone = "secure.test."
+# dnssec-key-file = "dnssec-key.pem"

@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  check:
+    name: Check (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy && rustup default stable
+      - name: Install native tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config python3-venv
+      - name: Prepare LMDB
+        run: ./doctor.sh
+      - name: Check shell syntax
+        run: bash -n install.sh doctor.sh scripts/*.sh
+      - name: Formatting, Clippy, Rust and Python tests
+        run: ./scripts/test.sh

@@ -1,0 +1,31 @@
+[package]
+name = "dnsuck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = { version = "4.15.0", default-features = false, features = ["rustls-0_23", "http2"] }
+anyhow = "1.0.104"
+async-graphql = { version = "7.2.1", default-features = false }
+async-trait = "0.1.92"
+base64 = "0.23.1"
+clap = { version = "4.6.6", features = ["derive"] }
+domain = "0.12.2"
+hickory-server = { version = "0.26.3", features = ["dnssec-ring", "quic-ring", "tls-ring"] }
+libc = "0.2.189"
+lmdb = "0.8.0"
+rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+subtle = "2.6.1"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+toml = "1.1.6"
+url = "2.5.8"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[workspace]
+members = ["cmd"]
+resolver = "3"
