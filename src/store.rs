@@ -1,4 +1,4 @@
-use crate::records::{OrderMode, OrderModes, canonical, mode_key};
+use crate::records::{OrderMode, OrderModes, canonical, mode_key, parse_name};
 use anyhow::{Context, Result};
 use hickory_server::proto::{
     op::{Message, MessageType, OpCode},
@@ -10,12 +10,13 @@ use hickory_server::proto::{
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
 };
-use std::{collections::BTreeMap, fs, net::IpAddr, path::Path};
+use std::{collections::BTreeMap, fs, net::IpAddr, path::Path, sync::Mutex};
 
 pub struct Store {
     env: Environment,
     db: Database,
     meta: Database,
+    wildcards: Mutex<Option<(u64, Wildcards)>>,
 }
 
 impl Store {
@@ -24,13 +25,19 @@ impl Store {
         let env = Environment::new()
             // Tokio reuses many blocking workers; release reader slots with each transaction.
             .set_flags(EnvironmentFlags::NO_TLS)
+            .set_max_readers(1024)
             .set_max_dbs(2)
             .set_map_size(64 * 1024 * 1024)
             .open(path)
             .context("opening LMDB")?;
         let db = env.create_db(Some("records"), DatabaseFlags::empty())?;
         let meta = env.create_db(Some("metadata"), DatabaseFlags::empty())?;
-        Ok(Self { env, db, meta })
+        Ok(Self {
+            env,
+            db,
+            meta,
+            wildcards: Mutex::new(None),
+        })
     }
 
     /// Replace the address RRset of the same family, preserving other types.
@@ -40,7 +47,7 @@ impl Store {
             IpAddr::V6(ip) => RData::AAAA(AAAA(ip)),
         };
         self.put_records(vec![Record::from_rdata(
-            Name::from_ascii(&canonical(name)?)?,
+            parse_name(&canonical(name)?)?,
             ttl,
             data,
         )])?;
@@ -69,7 +76,7 @@ impl Store {
         let mut groups: BTreeMap<String, Vec<Record>> = BTreeMap::new();
         for mut record in records {
             let key = canonical(&record.name.to_ascii())?;
-            record.name = Name::from_ascii(&key)?;
+            record.name = parse_name(&key)?;
             groups.entry(key).or_default().push(record);
         }
         let mut txn = self.env.begin_rw_txn()?;
@@ -197,7 +204,11 @@ impl Store {
 
     pub fn snapshot(&self) -> Result<(u64, Vec<Record>)> {
         let txn = self.env.begin_ro_txn()?;
-        let revision = self.revision_in(&txn)?;
+        self.snapshot_in(&txn)
+    }
+
+    fn snapshot_in(&self, txn: &impl Transaction) -> Result<(u64, Vec<Record>)> {
+        let revision = self.revision_in(txn)?;
         let mut cursor = txn.open_ro_cursor(self.db)?;
         let mut records = Vec::new();
         for (key, bytes) in cursor.iter() {
@@ -295,23 +306,109 @@ impl Store {
         Ok(deleted)
     }
 
+    /// Resolve exact names first, then whole-label wildcard patterns.
+    fn source_in(&self, txn: &impl Transaction, key: &str) -> Result<Option<String>> {
+        match txn.get(self.db, &key) {
+            Ok(_) => return Ok(Some(key.into())),
+            Err(lmdb::Error::NotFound) => {}
+            Err(error) => return Err(error.into()),
+        }
+        let revision = self.revision_in(txn)?;
+        let mut cached = self
+            .wildcards
+            .lock()
+            .map_err(|_| anyhow::anyhow!("wildcard cache poisoned"))?;
+        if cached
+            .as_ref()
+            .is_none_or(|(stored, _)| *stored != revision)
+        {
+            let mut index = Wildcards::default();
+            let mut cursor = txn.open_ro_cursor(self.db)?;
+            for (key, _) in cursor.iter() {
+                let key = std::str::from_utf8(key)?;
+                // Canonical names escape embedded dots; Hickory owns label parsing.
+                if key.contains('*') {
+                    let name = parse_name(key)?;
+                    if has_wildcard(&name) {
+                        index.insert(&name, key);
+                    }
+                }
+            }
+            *cached = Some((revision, index));
+        }
+        let name = parse_name(key)?;
+        Ok(cached
+            .as_ref()
+            .expect("initialized wildcard index")
+            .1
+            .find(&name))
+    }
+
+    pub(crate) fn sources(&self, records: &[Record]) -> Result<BTreeMap<String, String>> {
+        let txn = self.env.begin_ro_txn()?;
+        let mut sources = BTreeMap::new();
+        for record in records {
+            let key = canonical(&record.name.to_ascii())?;
+            if !sources.contains_key(&key)
+                && let Some(source) = self.source_in(&txn, &key)?
+            {
+                sources.insert(key, source);
+            }
+        }
+        Ok(sources)
+    }
+
+    /// A signed query gets concrete synthesized owners and the same LMDB snapshot.
+    pub(crate) fn snapshot_for_query(
+        &self,
+        name: &str,
+        kind: RecordType,
+    ) -> Result<Option<(u64, Vec<Record>)>> {
+        let txn = self.env.begin_ro_txn()?;
+        let (_, synthesized) = self.lookup_in(&txn, name, kind)?;
+        if synthesized.is_empty() {
+            return Ok(None);
+        }
+        let (revision, mut records) = self.snapshot_in(&txn)?;
+        records.retain(|record| !has_wildcard(&record.name));
+        records.extend(synthesized);
+        Ok(Some((revision, records)))
+    }
+
     /// None means NXDOMAIN; an empty vector means NODATA. Follow local CNAMEs.
     pub fn lookup(&self, name: &str, kind: RecordType) -> Result<Option<Vec<Record>>> {
+        Ok(self.lookup_in(&self.env.begin_ro_txn()?, name, kind)?.0)
+    }
+
+    fn lookup_in(
+        &self,
+        txn: &impl Transaction,
+        name: &str,
+        kind: RecordType,
+    ) -> Result<(Option<Vec<Record>>, Vec<Record>)> {
         let mut key = canonical(name)?;
-        let txn = self.env.begin_ro_txn()?;
         let mut answers = Vec::new();
+        let mut synthesized = Vec::new();
         for _ in 0..16 {
-            let values = match txn.get(self.db, &key) {
-                Ok(bytes) => decode(&key, bytes)?,
-                Err(lmdb::Error::NotFound) => {
-                    return Ok(if answers.is_empty() {
+            let Some(source) = self.source_in(txn, &key)? else {
+                return Ok((
+                    if answers.is_empty() {
                         None
                     } else {
                         Some(answers)
-                    });
-                }
-                Err(error) => return Err(error.into()),
+                    },
+                    synthesized,
+                ));
             };
+            let mut values = decode(&source, txn.get(self.db, &source)?)?;
+            let owner = parse_name(&key)?;
+            if source != key || has_wildcard(&owner) {
+                for record in &mut values {
+                    record.name = owner.clone();
+                }
+                // Include every type for correct signed NODATA proofs.
+                synthesized.extend(values.iter().cloned());
+            }
             let matching: Vec<_> = values
                 .iter()
                 .filter(|r| kind == RecordType::ANY || r.record_type() == kind)
@@ -319,7 +416,7 @@ impl Store {
                 .collect();
             if !matching.is_empty() {
                 answers.extend(matching);
-                return Ok(Some(answers));
+                return Ok((Some(answers), synthesized));
             }
             if let Some(cname) = values.iter().find(|r| r.record_type() == RecordType::CNAME)
                 && let RData::CNAME(target) = &cname.data
@@ -328,9 +425,94 @@ impl Store {
                 answers.push(cname.clone());
                 continue;
             }
-            return Ok(Some(answers));
+            return Ok((Some(answers), synthesized));
         }
         anyhow::bail!("CNAME loop or chain longer than 16 records")
+    }
+}
+
+pub(crate) fn has_wildcard(name: &Name) -> bool {
+    name.iter().any(|label| label == b"*" || label == b"**")
+}
+
+/// Reverse-label trie, rebuilt from LMDB keys only when its revision changes.
+#[derive(Default)]
+struct Wildcards {
+    children: BTreeMap<Vec<u8>, Wildcards>,
+    pattern: Option<WildcardPattern>,
+}
+
+struct WildcardPattern {
+    key: String,
+    rank: (usize, usize, Vec<u8>),
+}
+
+impl Wildcards {
+    fn insert(&mut self, name: &Name, key: &str) {
+        let rank: Vec<_> = name
+            .iter()
+            .rev()
+            .map(|label| match label {
+                b"**" => 0,
+                b"*" => 1,
+                _ => 2,
+            })
+            .collect();
+        let fixed = rank.iter().filter(|&&v| v == 2).count();
+        let single = rank.iter().filter(|&&v| v == 1).count();
+        let mut node = self;
+        for label in name.iter().rev() {
+            node = node.children.entry(label.to_vec()).or_default();
+        }
+        node.pattern = Some(WildcardPattern {
+            key: key.into(),
+            rank: (fixed, single, rank),
+        });
+    }
+
+    fn find(&self, name: &Name) -> Option<String> {
+        let labels: Vec<_> = name.iter().rev().collect();
+        let mut best = None;
+        let mut visited = std::collections::HashSet::new();
+        self.search(&labels, &mut visited, &mut best);
+        best.map(|pattern| pattern.key.clone())
+    }
+
+    fn search<'a>(
+        &'a self,
+        labels: &[&[u8]],
+        visited: &mut std::collections::HashSet<(usize, usize)>,
+        best: &mut Option<&'a WildcardPattern>,
+    ) {
+        // Repeated ** must not revisit every possible partition of the labels.
+        if !visited.insert((self as *const Self as usize, labels.len())) {
+            return;
+        }
+        let Some((label, rest)) = labels.split_first() else {
+            if let Some(pattern) = &self.pattern
+                && best.is_none_or(|old| {
+                    pattern.rank > old.rank || (pattern.rank == old.rank && pattern.key < old.key)
+                })
+            {
+                *best = Some(pattern);
+            }
+            return;
+        };
+        if *label != b"*"
+            && *label != b"**"
+            && let Some(child) = self.children.get(*label)
+        {
+            child.search(rest, visited, best);
+        }
+        if let Some(child) = self.children.get(b"*".as_slice()) {
+            child.search(rest, visited, best);
+        }
+        if let Some(child) = self.children.get(b"**".as_slice()) {
+            // ** consumes at least one complete label, never zero labels.
+            for consumed in 1..=labels.len() {
+                child.search(&labels[consumed..], visited, best);
+            }
+        }
     }
 }
 
@@ -347,11 +529,7 @@ fn decode(key: &str, bytes: &[u8]) -> Result<Vec<Record>> {
                 IpAddr::V4(ip) => RData::A(A(ip)),
                 IpAddr::V6(ip) => RData::AAAA(AAAA(ip)),
             };
-            Ok(Record::from_rdata(
-                Name::from_ascii(key)?,
-                ttl.parse()?,
-                data,
-            ))
+            Ok(Record::from_rdata(parse_name(key)?, ttl.parse()?, data))
         })
         .collect()
 }

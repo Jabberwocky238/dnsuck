@@ -24,7 +24,7 @@ pub struct DnsRecord {
 impl From<Record> for DnsRecord {
     fn from(record: Record) -> Self {
         Self {
-            name: record.name.to_ascii(),
+            name: crate::records::name_text(&record.name),
             record_type: domain::base::iana::Rtype::from(u16::from(record.record_type()))
                 .to_string(),
             ttl: record.ttl,
@@ -59,7 +59,10 @@ impl Query {
             .filter(|r| kind.is_none_or(|kind| kind == RecordType::ANY || kind == r.record_type()))
             .map(|record| {
                 let mode = modes
-                    .get(&(record.name.to_ascii(), u16::from(record.record_type())))
+                    .get(&(
+                        crate::records::name_text(&record.name),
+                        u16::from(record.record_type()),
+                    ))
                     .copied();
                 let mut result = DnsRecord::from(record);
                 result.mode = mode;

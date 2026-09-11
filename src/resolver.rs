@@ -110,7 +110,10 @@ impl RequestHandler for Resolver {
         {
             let signed = signed.clone();
             let store = self.store.clone();
-            match tokio::task::spawn_blocking(move || signed.catalog(&store))
+            let info = request.request_info().expect("validated query");
+            let name = info.query.name().to_string();
+            let kind = info.query.query_type();
+            match tokio::task::spawn_blocking(move || signed.catalog_for(&store, &name, kind))
                 .await
                 .map_err(anyhow::Error::from)
                 .and_then(|result| result)
@@ -209,14 +212,27 @@ impl Ordering {
             .map(str::to_owned)
     }
 
-    pub fn sort(&self, records: &mut [Record], modes: &OrderModes, peer: IpAddr) {
+    pub fn sort(
+        &self,
+        records: &mut [Record],
+        modes: &OrderModes,
+        sources: &BTreeMap<String, String>,
+        peer: IpAddr,
+    ) {
         let mut groups: BTreeMap<(String, u16), Vec<usize>> = BTreeMap::new();
         for (index, record) in records.iter().enumerate() {
             let key = (
-                record.name.to_ascii().to_ascii_lowercase(),
+                crate::records::name_text(&record.name).to_ascii_lowercase(),
                 u16::from(record.record_type()),
             );
-            if modes.contains_key(&key) {
+            let source = (
+                sources
+                    .get(&key.0)
+                    .cloned()
+                    .unwrap_or_else(|| key.0.clone()),
+                key.1,
+            );
+            if modes.contains_key(&source) {
                 groups.entry(key).or_default().push(index);
             }
         }
@@ -228,6 +244,7 @@ impl Ordering {
                 .iter()
                 .map(|&index| records[index].clone())
                 .collect();
+            let key = (sources.get(&key.0).cloned().unwrap_or(key.0), key.1);
             match modes[&key] {
                 OrderMode::Lb => {
                     let existing = self
@@ -305,8 +322,17 @@ impl<R: ResponseHandler> ResponseHandler for OrderedResponse<R> {
         response.destructive_emit(&mut encoder)?;
         let mut message = Message::from_vec(&wire)?;
         if message.signature.is_none() {
+            let store = self.store.clone();
+            let (mut ordered, sources) = tokio::task::spawn_blocking(move || {
+                let sources = store.sources(&message.answers)?;
+                anyhow::Ok((message, sources))
+            })
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             self.ordering
-                .sort(&mut message.answers, &modes, self.peer.ip());
+                .sort(&mut ordered.answers, &modes, &sources, self.peer.ip());
+            message = ordered;
         }
         let request = Request::from_bytes(wire, self.peer, Protocol::Tcp)?;
         let mut builder = MessageResponseBuilder::from_message_request(&request);

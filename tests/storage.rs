@@ -188,3 +188,70 @@ fn reader_slots_are_released_between_blocking_workers() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn wildcard_depth_and_specificity_are_not_limited_to_the_leftmost_label() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    let pattern = format!("{}deep.test", "*.".repeat(80));
+    let query = format!("{}deep.test", "x.".repeat(80));
+    assert!(store.lookup(&query, RecordType::A)?.is_none());
+    store.put(&pattern, "192.0.2.1".parse()?, 60)?;
+    let records = store.lookup(&query, RecordType::A)?.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].name.to_ascii(), format!("{query}."));
+    assert_eq!(store.records(&pattern)?.len(), 1);
+    assert!(store.records(&query)?.is_empty());
+    assert!(
+        store
+            .lookup(&format!("x.{query}"), RecordType::A)?
+            .is_none()
+    );
+    store.put("*.*.*.example.com", "192.0.2.9".parse()?, 60)?;
+    assert_eq!(
+        store
+            .lookup("a.b.c.example.com", RecordType::A)?
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store.lookup("a.b.example.com", RecordType::A)?.is_none());
+    assert!(
+        store
+            .lookup("a.b.c.d.example.com", RecordType::A)?
+            .is_none()
+    );
+    // More fixed labels win even when their rightmost fixed label is farther left.
+    store.put("a.b.*.rank.test", "192.0.2.2".parse()?, 60)?;
+    store.put("*.*.c.rank.test", "192.0.2.3".parse()?, 60)?;
+    let records = store.lookup("a.b.c.rank.test", RecordType::A)?.unwrap();
+    assert!(matches!(&records[0].data, RData::A(ip) if ip.to_string() == "192.0.2.2"));
+    // Exact names block wildcard fallback regardless of the requested type.
+    store.put(&query, "2001:db8::1".parse()?, 60)?;
+    assert!(store.lookup(&query, RecordType::A)?.unwrap().is_empty());
+    store.delete(&query, None)?;
+    assert_eq!(store.lookup(&query, RecordType::A)?.unwrap().len(), 1);
+    store.delete(&pattern, None)?;
+    assert!(store.lookup(&query, RecordType::A)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn repeated_globstars_reuse_states_and_preserve_canonical_keys() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    let pattern = format!("{}glob.test", "**.".repeat(30));
+    let query = format!("{}glob.test", "x.".repeat(80));
+    store.put(&pattern, "192.0.2.8".parse()?, 60)?;
+    assert_eq!(store.lookup(&query, RecordType::A)?.unwrap().len(), 1);
+    assert!(
+        store
+            .lookup(&format!("{}glob.test", "x.".repeat(29)), RecordType::A)?
+            .is_none()
+    );
+    assert_eq!(store.names("**.", "", 10)?, vec![format!("{pattern}.")]);
+    assert_eq!(store.records(&pattern)?.len(), 1);
+    store.delete(&pattern, None)?;
+    assert!(store.lookup(&query, RecordType::A)?.is_none());
+    Ok(())
+}

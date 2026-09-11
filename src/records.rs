@@ -4,7 +4,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use hickory_server::proto::{
     op::{Message, MessageType, OpCode},
     rr::{Name, RData, Record, RecordType, rdata::NULL},
-    serialize::binary::{BinEncodable, BinEncoder},
+    serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder},
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +19,46 @@ pub struct RecordInput {
 }
 
 pub(crate) fn canonical(name: &str) -> Result<String> {
-    let mut name = Name::from_ascii(name)?;
+    let name = parse_name(name)?.to_lowercase();
+    Ok(name_text(&name))
+}
+
+/// Keep DNS name parsing in existing libraries; Hickory's text parser rejects **.
+pub(crate) fn parse_name(text: &str) -> Result<Name> {
+    let mut name = match Name::from_ascii(text) {
+        Ok(name) => name,
+        Err(error) => {
+            let parsed: domain::base::Name<Vec<u8>> = text.parse()?;
+            if !parsed.iter().any(|label| label.as_ref() == b"**") {
+                return Err(error.into());
+            }
+            Name::read(&mut BinDecoder::new(parsed.as_slice()))?
+        }
+    };
     name.set_fqdn(true);
-    Ok(name.to_lowercase().to_ascii())
+    Ok(name)
+}
+
+pub(crate) fn name_text(name: &Name) -> String {
+    if !name.iter().any(|label| label == b"**") {
+        return name.to_ascii();
+    }
+    let labels: Vec<_> = name
+        .iter()
+        .map(|label| {
+            if label == b"**" {
+                "**".to_string()
+            } else {
+                Name::from_labels([label])
+                    .expect("validated label")
+                    .to_ascii()
+                    .strip_suffix('.')
+                    .expect("absolute label")
+                    .to_string()
+            }
+        })
+        .collect();
+    format!("{}.", labels.join("."))
 }
 
 pub fn record_type(value: &str) -> Result<RecordType> {
@@ -59,7 +96,7 @@ impl RecordInput {
         };
         let mut message = Message::new(0, MessageType::Response, OpCode::Query);
         message.answers.push(Record::from_rdata(
-            Name::from_ascii(&canonical(&self.name)?)?,
+            parse_name(&canonical(&self.name)?)?,
             self.ttl,
             data,
         ));

@@ -4,7 +4,7 @@ use hickory_server::{
     dnssec::NxProofKind,
     proto::{
         dnssec::{Algorithm, DnssecSigner, SigningKey, crypto::EcdsaSigningKey, rdata::DNSKEY},
-        rr::{Name, RData, RecordType},
+        rr::{Name, RData, Record, RecordType},
     },
     store::in_memory::InMemoryZoneHandler,
     zone_handler::{AxfrPolicy, Catalog, ZoneType},
@@ -52,7 +52,29 @@ impl SignedZone {
         {
             return Ok(snapshot.catalog.clone());
         }
-        let (revision, records) = store.snapshot()?;
+        let (revision, mut records) = store.snapshot()?;
+        // Patterns are templates, not RFC 4592 wildcard owners in the signed zone.
+        let templates = records.iter().any(|record| {
+            self.origin.zone_of(&record.name) && crate::store::has_wildcard(&record.name)
+        });
+        records.retain(|record| !crate::store::has_wildcard(&record.name));
+        let catalog = self.build(revision, records, templates)?;
+        *cache = Some(Snapshot {
+            revision,
+            created: Instant::now(),
+            catalog: catalog.clone(),
+        });
+        Ok(catalog)
+    }
+
+    pub fn catalog_for(&self, store: &Store, name: &str, kind: RecordType) -> Result<Arc<Catalog>> {
+        match store.snapshot_for_query(name, kind)? {
+            Some((revision, records)) => self.build(revision, records, true),
+            None => self.catalog(store),
+        }
+    }
+
+    fn build(&self, revision: u64, records: Vec<Record>, templates: bool) -> Result<Arc<Catalog>> {
         let has_apex = |kind| {
             records
                 .iter()
@@ -84,6 +106,11 @@ impl SignedZone {
             }
             if let RData::SOA(soa) = &mut record.data {
                 soa.serial = soa.serial.wrapping_add(revision as u32);
+                // The concrete namespace is synthesized per query. Do not let
+                // cached NSEC intervals suppress other matching template names.
+                if templates {
+                    soa.minimum = 0;
+                }
             }
             anyhow::ensure!(
                 zone.upsert_mut(record, revision as u32),
@@ -103,11 +130,6 @@ impl SignedZone {
         let mut catalog = Catalog::new();
         catalog.upsert(self.origin.clone().into(), vec![Arc::new(zone)]);
         let catalog = Arc::new(catalog);
-        *cache = Some(Snapshot {
-            revision,
-            created: Instant::now(),
-            catalog: catalog.clone(),
-        });
         Ok(catalog)
     }
 }
