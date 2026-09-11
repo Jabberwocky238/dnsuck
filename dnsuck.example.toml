@@ -1,5 +1,5 @@
 # Start: dnsuck -c dnsuck.toml
-# Apply edits to the running config-file instance: dnsuck --reload
+# Apply edits to the running config-file instance: dnsuckd --reload
 # Do not combine -c with other configuration flags.
 listen = "127.0.0.1:3080"
 database = "data/lmdb"
@@ -21,3 +21,6 @@ dns = "127.0.0.1:5353"
 
 # dnssec-zone = "secure.test."
 # dnssec-key-file = "dnssec-key.pem"
+
+# Prepared by ./doctor.sh; required to enable geo ordering on records.
+# mmdb = ".local/geo/country.mmdb"

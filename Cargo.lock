@@ -764,6 +764,7 @@ dependencies = [
  "csv",
  "reqwest",
  "serde_json",
+ "time",
 ]
 
 [[package]]
@@ -780,11 +781,14 @@ dependencies = [
  "hickory-server",
  "libc",
  "lmdb",
+ "maxminddb",
+ "rand",
  "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "toml",
  "url",
@@ -1423,6 +1427,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1627,6 +1637,18 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "maxminddb"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0673d20587e2a92e0a02e372a626ddc914955d645a0947613b8a7f39455e332b"
+dependencies = [
+ "ipnetwork",
+ "memchr",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "memchr"

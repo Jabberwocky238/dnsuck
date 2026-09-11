@@ -3,6 +3,10 @@ name = "dnsuck"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "dnsuckd"
+path = "src/main.rs"
+
 [dependencies]
 actix-web = { version = "4.15.0", default-features = false, features = ["rustls-0_23", "http2"] }
 anyhow = "1.0.104"
@@ -14,6 +18,8 @@ domain = "0.12.2"
 hickory-server = { version = "0.26.3", features = ["dnssec-ring", "quic-ring", "tls-ring"] }
 libc = "0.2.189"
 lmdb = "0.8.0"
+maxminddb = "0.31.0"
+rand = "0.10.2"
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -28,3 +34,6 @@ tempfile = "3.27.0"
 [workspace]
 members = ["cmd"]
 resolver = "3"
+
+[build-dependencies]
+time = { version = "0.3.55", features = ["formatting"] }

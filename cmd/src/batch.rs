@@ -1,4 +1,4 @@
-use crate::Command;
+use crate::{Command, OrderMode, WriteArgs};
 use anyhow::{Context, Result};
 
 /// Parse each --item with the csv crate, before making any HTTP requests.
@@ -23,10 +23,12 @@ fn parse_item(item: &str) -> Result<Command> {
     let fields = &rows[0];
     anyhow::ensure!(
         fields.len() >= 3 && !fields[1].is_empty() && !fields[2].is_empty(),
-        "expected get/del,domain,record or set,domain,record,value"
+        "expected get,domain,record; del,domain,record[,value]; or add/put,domain,record,value[,mode]"
     );
     match (&fields[0], fields.len()) {
-        ("del", 3) => Ok(Command::Del {
+        ("del", 3..=4) => Ok(Command::Del {
+            value: fields.get(3).map(Into::into),
+            raw: false,
             domain: fields[1].into(),
             record_type: fields[2].into(),
         }),
@@ -34,13 +36,30 @@ fn parse_item(item: &str) -> Result<Command> {
             domain: fields[1].into(),
             record_type: fields[2].into(),
         }),
-        ("set", 4) => Ok(Command::Set {
-            domain: fields[1].into(),
-            record_type: fields[2].into(),
-            value: fields[3].into(),
-            ttl: 300,
-            raw: false,
-        }),
-        _ => anyhow::bail!("expected get/del,domain,record or set,domain,record,value"),
+        (operation @ ("add" | "put" | "set"), 4..=5) => {
+            let mode = fields
+                .get(4)
+                .map(|value| {
+                    <OrderMode as clap::ValueEnum>::from_str(value, false)
+                        .map_err(anyhow::Error::msg)
+                })
+                .transpose()?;
+            let args = WriteArgs {
+                mode,
+                domain: fields[1].into(),
+                record_type: fields[2].into(),
+                value: fields[3].into(),
+                ttl: 300,
+                raw: false,
+            };
+            Ok(if operation == "add" {
+                Command::Add(args)
+            } else {
+                Command::Put(args)
+            })
+        }
+        _ => anyhow::bail!(
+            "expected get,domain,record; del,domain,record[,value]; or add/put,domain,record,value[,mode]"
+        ),
     }
 }

@@ -1,4 +1,4 @@
-use crate::records::canonical;
+use crate::records::{OrderMode, OrderModes, canonical, mode_key};
 use anyhow::{Context, Result};
 use hickory_server::proto::{
     op::{Message, MessageType, OpCode},
@@ -7,7 +7,9 @@ use hickory_server::proto::{
         rdata::{A, AAAA},
     },
 };
-use lmdb::{Cursor, Database, DatabaseFlags, Environment, Transaction, WriteFlags};
+use lmdb::{
+    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
+};
 use std::{collections::BTreeMap, fs, net::IpAddr, path::Path};
 
 pub struct Store {
@@ -20,6 +22,8 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         fs::create_dir_all(path).context("creating LMDB directory")?;
         let env = Environment::new()
+            // Tokio reuses many blocking workers; release reader slots with each transaction.
+            .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(2)
             .set_map_size(64 * 1024 * 1024)
             .open(path)
@@ -45,7 +49,23 @@ impl Store {
 
     /// Atomically replace the supplied RRsets, preserving other names/types.
     pub fn put_records(&self, records: Vec<Record>) -> Result<usize> {
+        self.write_records(records, true, None)
+    }
+
+    /// Append distinct records atomically, preserving existing RRsets.
+    pub fn add_records(&self, records: Vec<Record>) -> Result<usize> {
+        self.write_records(records, false, None)
+    }
+
+    pub fn write_records(
+        &self,
+        records: Vec<Record>,
+        replace: bool,
+        mode: Option<OrderMode>,
+    ) -> Result<usize> {
         let count = records.len();
+        let mut added = 0;
+        let mut changed = false;
         let mut groups: BTreeMap<String, Vec<Record>> = BTreeMap::new();
         for mut record in records {
             let key = canonical(&record.name.to_ascii())?;
@@ -59,13 +79,47 @@ impl Store {
                 Err(lmdb::Error::NotFound) => Vec::new(),
                 Err(error) => return Err(error.into()),
             };
-            values.retain(|old| {
-                !incoming
-                    .iter()
-                    .any(|new| new.record_type() == old.record_type())
-            });
+            if let Some(mode) = mode {
+                for record in &incoming {
+                    anyhow::ensure!(
+                        mode != OrderMode::Geo
+                            || matches!(record.record_type(), RecordType::A | RecordType::AAAA),
+                        "geo ordering requires A or AAAA records"
+                    );
+                    let key = mode_key(&key, record.record_type());
+                    let bytes = serde_json::to_vec(&mode)?;
+                    if txn.get(self.meta, &key).ok() != Some(bytes.as_slice()) {
+                        txn.put(self.meta, &key, &bytes, WriteFlags::empty())?;
+                        changed = true;
+                    }
+                }
+            }
+            let old_len = values.len();
+            if replace {
+                values.retain(|old| {
+                    !incoming
+                        .iter()
+                        .any(|new| new.record_type() == old.record_type())
+                });
+            }
             values.extend(incoming);
-            values.dedup();
+            // Validate TTLs before deduplication: DNS record equality can omit TTL.
+            for record in &values {
+                anyhow::ensure!(
+                    values
+                        .iter()
+                        .filter(|r| r.record_type() == record.record_type())
+                        .all(|r| r.ttl == record.ttl),
+                    "RRset TTLs must match at {key}"
+                );
+            }
+            let mut unique = Vec::with_capacity(values.len());
+            for record in values {
+                if !unique.contains(&record) {
+                    unique.push(record);
+                }
+            }
+            let values = unique;
             let cnames = values
                 .iter()
                 .filter(|r| r.record_type() == RecordType::CNAME)
@@ -79,24 +133,40 @@ impl Store {
                         ))),
                 "CNAME must be the only record at {key}"
             );
-            for record in &values {
-                anyhow::ensure!(
-                    values
-                        .iter()
-                        .filter(|r| r.record_type() == record.record_type())
-                        .all(|r| r.ttl == record.ttl),
-                    "RRset TTLs must match at {key}"
-                );
+            if !replace {
+                let new_count = values.len().saturating_sub(old_len);
+                added += new_count;
+                if new_count == 0 {
+                    continue;
+                }
             }
+            changed = true;
             let mut message = Message::new(0, MessageType::Response, OpCode::Query);
             message.answers = values;
             let mut bytes = b"DNS1".to_vec();
             bytes.extend(message.to_vec()?);
             txn.put(self.db, &key, &bytes, WriteFlags::empty())?;
         }
-        self.bump_revision(&mut txn)?;
+        if changed {
+            self.bump_revision(&mut txn)?;
+        }
         txn.commit()?;
-        Ok(count)
+        Ok(if replace { count } else { added })
+    }
+
+    /// Persisted per-RRset ordering policies; lb cursors are never stored here.
+    pub fn modes(&self) -> Result<OrderModes> {
+        let txn = self.env.begin_ro_txn()?;
+        let mut cursor = txn.open_ro_cursor(self.meta)?;
+        let mut modes = OrderModes::new();
+        for (key, value) in cursor.iter() {
+            let key = std::str::from_utf8(key)?;
+            if let Some(key) = key.strip_prefix("mode:") {
+                let (kind, name) = key.split_once(':').context("invalid ordering key")?;
+                modes.insert((name.into(), kind.parse()?), serde_json::from_slice(value)?);
+            }
+        }
+        Ok(modes)
     }
 
     fn revision_in(&self, txn: &impl Transaction) -> Result<u64> {
@@ -164,6 +234,23 @@ impl Store {
     }
 
     pub fn delete(&self, name: &str, kind: Option<RecordType>) -> Result<usize> {
+        self.delete_matching(name, kind, None)
+    }
+
+    pub fn delete_record(&self, record: &Record) -> Result<usize> {
+        self.delete_matching(
+            &record.name.to_ascii(),
+            Some(record.record_type()),
+            Some(&record.data),
+        )
+    }
+
+    fn delete_matching(
+        &self,
+        name: &str,
+        kind: Option<RecordType>,
+        data: Option<&RData>,
+    ) -> Result<usize> {
         let key = canonical(name)?;
         let mut txn = self.env.begin_rw_txn()?;
         let mut records = match txn.get(self.db, &key) {
@@ -171,11 +258,28 @@ impl Store {
             Err(lmdb::Error::NotFound) => return Ok(0),
             Err(error) => return Err(error.into()),
         };
+        let removed_types: Vec<_> = records
+            .iter()
+            .filter(|record| kind.is_none_or(|kind| record.record_type() == kind))
+            .map(|record| record.record_type())
+            .collect();
         let before = records.len();
-        records.retain(|record| kind.is_some_and(|kind| record.record_type() != kind));
+        records.retain(|record| {
+            kind.is_some_and(|kind| record.record_type() != kind)
+                || data.is_some_and(|data| &record.data != data)
+        });
         let deleted = before - records.len();
         if deleted == 0 {
             return Ok(0);
+        }
+        for kind in removed_types {
+            if records.iter().any(|record| record.record_type() == kind) {
+                continue;
+            }
+            match txn.del(self.meta, &mode_key(&key, kind), None) {
+                Ok(()) | Err(lmdb::Error::NotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         if records.is_empty() {
             txn.del(self.db, &key, None)?;

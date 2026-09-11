@@ -37,12 +37,12 @@ def available_port():
 
 
 class Server:
-    def __init__(self, signed=False, encrypted_dns=False, management_only=False, proxy=False):
+    def __init__(self, signed=False, encrypted_dns=False, management_only=False, proxy=False, mmdb=None):
         self.temp = tempfile.TemporaryDirectory(prefix="dns-web-test-")
         self.path = Path(self.temp.name)
         self.process = None
         self.client = None
-        self.binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        self.binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         self.port = available_port()
         self.https_port = available_port()
         self.management_port = available_port()
@@ -82,6 +82,8 @@ class Server:
                         index = self.args.index(flag)
                         del self.args[index:index + 2]
                     self.args.append(f"--{proto}-no-cert")
+        if mmdb is not None:
+            self.args.extend(["--mmdb", str(mmdb)])
         if signed:
             self.args.extend(["--dnssec-zone", "secure.test.", "--dnssec-key-file", str(self.path / "key.pem")])
         write(self.binary, self.args, INITIAL_RECORDS)

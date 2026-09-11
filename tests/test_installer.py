@@ -43,8 +43,8 @@ shutil.copyfile(pathlib.Path(os.environ['INSTALL_TEST_ASSETS']) / url.rsplit('/'
     def archive(self, target, bad_path=False):
         path = self.assets / f"dnsuck-{target}.tar.gz"
         with tarfile.open(path, "w:gz") as archive:
-            for name, content in [("dnsuck", b"#!/bin/sh\necho dnsuck-test\n"),
-                                  ("cmd", b"#!/bin/sh\necho cmd-test\n"), ("VERSION", b"v1.2.3\n")]:
+            for name, content in [("dnsuckd", b"#!/bin/sh\necho dnsuckd-test\n"),
+                                  ("dnsuck", b"#!/bin/sh\necho dnsuck-test\n"), ("VERSION", b"v1.2.3\n")]:
                 entry = tarfile.TarInfo("../escaped" if bad_path and name == "dnsuck" else name)
                 entry.mode = 0o755
                 entry.size = len(content)
@@ -64,7 +64,7 @@ shutil.copyfile(pathlib.Path(os.environ['INSTALL_TEST_ASSETS']) / url.rsplit('/'
                 for _ in range(2):
                     result = self.run_installer("--version", "v1.2.3")
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    for binary in ("dnsuck", "cmd"):
+                    for binary in ("dnsuckd", "dnsuck"):
                         link = self.prefix / "bin" / binary
                         self.assertTrue(link.is_symlink())
                         self.assertEqual(subprocess.check_output([link], text=True).strip(), binary + "-test")
@@ -74,10 +74,22 @@ shutil.copyfile(pathlib.Path(os.environ['INSTALL_TEST_ASSETS']) / url.rsplit('/'
                 result = self.run_installer("--uninstall")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse((self.prefix / "bin/dnsuck").is_symlink())
-                self.assertFalse((self.prefix / "bin/cmd").is_symlink())
+                self.assertFalse((self.prefix / "bin/dnsuckd").is_symlink())
                 self.assertFalse((self.prefix / "lib/dnsuck").exists())
                 self.assertTrue((data / "keep").exists())
                 self.assertEqual(self.run_installer("--uninstall").returncode, 0)
+
+    def test_legacy_cli_link_cleanup(self):
+        for action in ((), ("--uninstall",)):
+            self.assertEqual(self.run_installer().returncode, 0)
+            legacy = self.prefix / "bin/cmd"
+            legacy.symlink_to("../lib/dnsuck/old/cmd")
+            self.assertEqual(self.run_installer(*action).returncode, 0)
+            self.assertFalse(legacy.is_symlink())
+        legacy.symlink_to("/unrelated/cmd")
+        self.assertEqual(self.run_installer().returncode, 0)
+        self.assertEqual(self.run_installer("--uninstall").returncode, 0)
+        self.assertEqual(os.readlink(legacy), "/unrelated/cmd")
 
     def test_user_default_and_root_explicit_prefix(self):
         result = self.run_installer(default_prefix=True)
@@ -122,7 +134,7 @@ shutil.copyfile(pathlib.Path(os.environ['INSTALL_TEST_ASSETS']) / url.rsplit('/'
         (checkout / "target/release").mkdir(parents=True)
         script = checkout / "scripts/package-release.sh"
         shutil.copyfile(ROOT / "scripts/package-release.sh", script)
-        for name in ("dnsuck", "cmd"):
+        for name in ("dnsuckd", "dnsuck"):
             (checkout / "target/release" / name).write_text("#!/bin/sh\necho packaged\n")
         result = subprocess.run(["bash", str(script), "v2.0.0", "x86_64-unknown-linux-gnu", str(self.assets)],
                                 capture_output=True, text=True)

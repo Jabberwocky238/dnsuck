@@ -1,4 +1,4 @@
-use crate::{RecordInput, decode_inputs, resolver::Resolver};
+use crate::{RecordInput, decode_inputs, records::OrderMode, resolver::Resolver};
 use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
 use hickory_server::proto::rr::{Record, RecordType};
 use std::sync::Arc;
@@ -19,6 +19,7 @@ pub struct DnsRecord {
     record_type: String,
     ttl: u32,
     data: String,
+    mode: Option<OrderMode>,
 }
 impl From<Record> for DnsRecord {
     fn from(record: Record) -> Self {
@@ -28,6 +29,7 @@ impl From<Record> for DnsRecord {
                 .to_string(),
             ttl: record.ttl,
             data: record.data.to_string(),
+            mode: None,
         }
     }
 }
@@ -48,11 +50,21 @@ impl Query {
     ) -> async_graphql::Result<Vec<DnsRecord>> {
         let store = ctx.data::<Arc<Resolver>>()?.store.clone();
         let kind = record_type.as_deref().map(kind).transpose()?;
-        let records = tokio::task::spawn_blocking(move || store.records(&name)).await??;
+        let (records, modes) = tokio::task::spawn_blocking(move || {
+            Ok::<_, anyhow::Error>((store.records(&name)?, store.modes()?))
+        })
+        .await??;
         Ok(records
             .into_iter()
             .filter(|r| kind.is_none_or(|kind| kind == RecordType::ANY || kind == r.record_type()))
-            .map(Into::into)
+            .map(|record| {
+                let mode = modes
+                    .get(&(record.name.to_ascii(), u16::from(record.record_type())))
+                    .copied();
+                let mut result = DnsRecord::from(record);
+                result.mode = mode;
+                result
+            })
             .collect())
     }
 
@@ -81,27 +93,52 @@ impl Query {
 pub struct Mutation;
 #[Object]
 impl Mutation {
-    /// Atomically replace the supplied RRsets in LMDB.
-    async fn upsert(
+    /// Atomically append distinct records, preserving the existing RRsets.
+    async fn add(
         &self,
         ctx: &Context<'_>,
         records: Vec<RecordInput>,
+        mode: Option<OrderMode>,
     ) -> async_graphql::Result<i32> {
-        let resolver = ctx.data::<Arc<Resolver>>()?.clone();
+        let resolver = ctx.data::<Arc<Resolver>>()?;
+        if mode == Some(OrderMode::Geo) && !resolver.ordering.has_geo() {
+            return Err("configure --mmdb before enabling geo".into());
+        }
+        let store = resolver.store.clone();
         let count = tokio::task::spawn_blocking(move || {
-            let records = decode_inputs(records)?;
-            resolver.store.put_records(records)
+            store.write_records(decode_inputs(records)?, false, mode)
         })
         .await??;
         Ok(count.try_into()?)
     }
 
-    /// Delete one RRset, or all records at a name if recordType is omitted.
+    /// Atomically replace the supplied RRsets in LMDB.
+    async fn upsert(
+        &self,
+        ctx: &Context<'_>,
+        records: Vec<RecordInput>,
+        mode: Option<OrderMode>,
+    ) -> async_graphql::Result<i32> {
+        let resolver = ctx.data::<Arc<Resolver>>()?.clone();
+        if mode == Some(OrderMode::Geo) && !resolver.ordering.has_geo() {
+            return Err("configure --mmdb before enabling geo".into());
+        }
+        let count = tokio::task::spawn_blocking(move || {
+            let records = decode_inputs(records)?;
+            resolver.store.write_records(records, true, mode)
+        })
+        .await??;
+        Ok(count.try_into()?)
+    }
+
+    /// Delete a value, an RRset, or all records at a name.
     async fn delete(
         &self,
         ctx: &Context<'_>,
         name: String,
         record_type: Option<String>,
+        data: Option<String>,
+        rdata_base64: Option<String>,
     ) -> async_graphql::Result<i32> {
         let resolver = ctx.data::<Arc<Resolver>>()?.clone();
         let kind = record_type.as_deref().map(kind).transpose()?;
@@ -111,10 +148,26 @@ impl Mutation {
         {
             return Err("cannot delete the configured signed zone's apex SOA or NS".into());
         }
-        Ok(
-            tokio::task::spawn_blocking(move || resolver.store.delete(&name, kind))
-                .await??
-                .try_into()?,
-        )
+        let record = if data.is_some() || rdata_base64.is_some() {
+            let record_type = record_type.ok_or("recordType is required when deleting a value")?;
+            Some(
+                RecordInput {
+                    name: name.clone(),
+                    record_type,
+                    ttl: 0,
+                    data,
+                    rdata_base64,
+                }
+                .into_record()?,
+            )
+        } else {
+            None
+        };
+        Ok(tokio::task::spawn_blocking(move || match record {
+            Some(record) => resolver.store.delete_record(&record),
+            None => resolver.store.delete(&name, kind),
+        })
+        .await??
+        .try_into()?)
     }
 }

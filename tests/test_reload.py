@@ -22,7 +22,7 @@ class ReloadTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name)
         self.config = self.path / "dns.toml"
-        self.binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        self.binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         # Isolate the per-user control socket from other test runs and real servers.
         self.env = dict(os.environ, TMPDIR=str(self.path))
         self.port = available_port()

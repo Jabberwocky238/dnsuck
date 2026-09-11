@@ -11,7 +11,7 @@ usage() {
     cat <<'HELP'
 Usage: install.sh [--repo OWNER/REPO] [--version TAG] [--prefix PATH]
        install.sh --uninstall [--prefix PATH]
-Installs dnsuck and cmd from a checksummed GitHub release.
+Installs dnsuckd and dnsuck from a checksummed GitHub release.
 Default prefix: /usr/local for root, ~/.local otherwise.
 --uninstall removes managed binaries and links; databases remain untouched.
 Requires bash, curl, tar, and sha256sum or shasum for installation.
@@ -47,11 +47,11 @@ owned_link() {
 if $uninstall; then
     if [[ ! -e "$store" ]]; then echo 'Nothing installed.'; exit 0; fi
     [[ -f "$store/.managed-install" ]] || fail "Unrecognized directory: $store"
-    for binary in dnsuck cmd; do
+    for binary in dnsuckd dnsuck cmd; do
         if owned_link "$binary"; then rm "$bindir/$binary"; fi
     done
     rm -rf -- "$store"
-    echo "Uninstalled dnsuck and cmd from $prefix; databases preserved."
+    echo "Uninstalled dnsuckd and dnsuck from $prefix; databases preserved."
     exit 0
 fi
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail 'Use --repo OWNER/REPO'
@@ -69,7 +69,7 @@ asset="dnsuck-$target.tar.gz"
 base="https://github.com/$repository/releases"
 if [[ "$version" == latest ]]; then base="$base/latest/download"; else base="$base/download/$version"; fi
 [[ ! -e "$store" || -f "$store/.managed-install" ]] || fail "Unrecognized directory: $store"
-for binary in dnsuck cmd; do
+for binary in dnsuckd dnsuck; do
     if [[ -e "$bindir/$binary" || -L "$bindir/$binary" ]]; then
         owned_link "$binary" && [[ -f "$store/.managed-install" ]] || fail "Refusing to replace $bindir/$binary"
     fi
@@ -84,7 +84,7 @@ actual=$("${checksum[@]}" "$temporary/$asset")
 [[ "${actual%% *}" == "$expected" ]] || fail 'Release checksum mismatch'
 # Only accept the three expected regular files, never arbitrary archive paths.
 entries=$(tar -tzf "$temporary/$asset" | LC_ALL=C sort)
-[[ "$entries" == $'VERSION\ncmd\ndnsuck' ]] || fail 'Unexpected release archive contents'
+[[ "$entries" == $'VERSION\ndnsuck\ndnsuckd' ]] || fail 'Unexpected release archive contents'
 [[ $(tar -tvzf "$temporary/$asset" | awk 'substr($0,1,1) != "-" {n++} END {print n+0}') == 0 ]] || fail 'Archive contains non-regular files'
 mkdir "$temporary/extracted"
 tar -xzf "$temporary/$asset" -C "$temporary/extracted"
@@ -96,13 +96,15 @@ chmod 755 "$store"
 touch "$store/.managed-install"
 installed=$(mktemp -d "$store/$release-$target.XXXXXX")
 chmod 755 "$installed"
-for binary in dnsuck cmd; do
+for binary in dnsuckd dnsuck; do
     install -m 755 "$temporary/extracted/$binary" "$installed/$binary"
 done
 install -m 644 "$temporary/extracted/VERSION" "$installed/VERSION"
-for binary in dnsuck cmd; do
+for binary in dnsuckd dnsuck; do
     if owned_link "$binary"; then rm "$bindir/$binary"; fi
     ln -s "../lib/dnsuck/${installed##*/}/$binary" "$bindir/$binary"
 done
-echo "Installed $release ($target): $bindir/dnsuck and $bindir/cmd"
+# Remove the former CLI name only when it belongs to this installation.
+if owned_link cmd; then rm "$bindir/cmd"; fi
+echo "Installed $release ($target): $bindir/dnsuckd and $bindir/dnsuck"
 case ":$PATH:" in *":$bindir:"*) ;; *) echo "Add $bindir to your PATH." ;; esac

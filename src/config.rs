@@ -22,16 +22,18 @@ use tokio::{
 
 #[derive(Parser, Clone)]
 #[command(
-    name = "dnsuck",
-    version,
+    name = "dnsuckd",
+    version = env!("DNSUCK_BUILD_VERSION"),
+    long_version = concat!(env!("DNSUCK_BUILD_VERSION"), "\nBuilt: ", env!("DNSUCK_BUILD_TIME"), "\nCommit: ", env!("DNSUCK_BUILD_COMMIT")),
+    after_help = concat!("Version: ", env!("DNSUCK_BUILD_VERSION"), "\nBuilt: ", env!("DNSUCK_BUILD_TIME"), "\nCommit: ", env!("DNSUCK_BUILD_COMMIT")),
     about = "LMDB DNS server with DoH, DoT, DoQ, DNSSEC and GraphQL"
 )]
 pub struct Config {
     /// Read configuration exclusively from a TOML file.
-    #[arg(short = 'c', long = "config", value_name = "PATH", conflicts_with_all = ["dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file"], global = true)]
+    #[arg(short = 'c', long = "config", value_name = "PATH", conflicts_with_all = ["dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file", "mmdb"], global = true)]
     pub config: Option<PathBuf>,
     /// Reload the running config-file instance for this user.
-    #[arg(long, conflicts_with_all = ["config", "dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file"], global = true)]
+    #[arg(long, conflicts_with_all = ["config", "dns", "database", "doh", "doh_cert", "doh_key", "doh_no_cert", "dot", "dot_cert", "dot_key", "dot_no_cert", "doq", "doq_cert", "doq_key", "listen", "dnssec_zone", "dnssec_key_file", "mmdb"], global = true)]
     pub reload: bool,
     /// Enable UDP/TCP DNS, at the specified address and port.
     #[arg(long, value_name = "ADDRESS:PORT", global = true)]
@@ -75,6 +77,9 @@ pub struct Config {
     pub doq_cert: Option<PathBuf>,
     #[arg(long, requires = "doq", global = true)]
     pub doq_key: Option<PathBuf>,
+    /// Country MMDB used by geo record ordering (prepared by doctor.sh).
+    #[arg(long, global = true)]
+    pub mmdb: Option<PathBuf>,
     /// Management HTTP bind address.
     #[arg(
         long,
@@ -122,7 +127,7 @@ impl Config {
         let text = std::fs::read_to_string(&path).context("reading config file")?;
         let values: std::collections::BTreeMap<String, toml::Value> =
             toml::from_str(&text).context("parsing TOML config")?;
-        let mut args = vec![std::ffi::OsString::from("dnsuck")];
+        let mut args = vec![std::ffi::OsString::from("dnsuckd")];
         for (name, value) in values {
             let flag = name.replace('_', "-");
             let boolean = matches!(flag.as_str(), "doh-no-cert" | "dot-no-cert");
@@ -136,6 +141,7 @@ impl Config {
                     | "doq-cert"
                     | "doq-key"
                     | "dnssec-key-file"
+                    | "mmdb"
             );
             if !boolean
                 && !file
@@ -266,7 +272,20 @@ impl Prepared {
                 .map(Arc::new)
             })
             .transpose()?;
-        let resolver = Arc::new(Resolver { store, signed });
+        let ordering = Arc::new(crate::resolver::Ordering::load(config.mmdb.as_deref())?);
+        anyhow::ensure!(
+            ordering.has_geo()
+                || !store
+                    .modes()?
+                    .values()
+                    .any(|mode| *mode == crate::records::OrderMode::Geo),
+            "geo record ordering requires --mmdb PATH"
+        );
+        let resolver = Arc::new(Resolver {
+            store,
+            signed,
+            ordering,
+        });
         resolver.warm_signed().await?;
         let load = |address: Option<std::net::SocketAddr>,
                     no_cert: bool,

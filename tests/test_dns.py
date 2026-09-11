@@ -23,7 +23,7 @@ class DnsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.binary = os.environ.get("DNS_TEST_BINARY", str(
-            Path(__file__).resolve().parents[1] / "target/debug/dnsuck"))
+            Path(__file__).resolve().parents[1] / "target/debug/dnsuckd"))
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         with socket.socket() as sock:

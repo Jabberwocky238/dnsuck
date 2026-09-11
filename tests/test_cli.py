@@ -5,11 +5,12 @@ import unittest
 from support import Server
 
 
-@unittest.skipUnless(os.environ.get("DNS_TEST_CLI"), "run scripts/test.sh to build and test cmd")
+@unittest.skipUnless(os.environ.get("DNS_TEST_CLI"), "run scripts/test.sh to build and test dnsuck")
 class CLITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = Server()
+        from support import ROOT
+        cls.server = Server(mmdb=ROOT / "tests/data/country.mmdb")
         cls.addClassCleanup(cls.server.close)
         cls.binary = os.environ["DNS_TEST_CLI"]
 
@@ -113,4 +114,102 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [{"delete": 1}, {"records": []}])
         self.assertEqual(self.cli("del", "delete.test").returncode, 2)
-        self.assertEqual(self.cli("del", "delete.test", "A", "extra").returncode, 2)
+        self.assertEqual(self.cli("del", "delete.test", "A", "extra", "extra").returncode, 2)
+
+    def test_add_appends_and_put_replaces(self):
+        for kind, first, second in [("A", "192.0.2.1", "192.0.2.2"),
+                                    ("AAAA", "2001:db8::1", "2001:db8::2"),
+                                    ("TXT", '"one"', '"two"'),
+                                    ("MX", "10 mail1.test.", "20 mail2.test.")]:
+            with self.subTest(kind=kind):
+                name = f"append-{kind.lower()}.test"
+                self.assertEqual(self.cli("put", name, kind, first).returncode, 0)
+                result = self.cli("add", name, kind, second)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"add": 1})
+                self.assertEqual(len(json.loads(self.cli("get", name, kind).stdout)["records"]), 2)
+                result = self.cli("add", name, kind, first)
+                self.assertEqual(json.loads(result.stdout), {"add": 0})
+                self.assertEqual(self.cli("put", name, kind, second).returncode, 0)
+                self.assertEqual(len(json.loads(self.cli("get", name, kind).stdout)["records"]), 1)
+        self.assertEqual(self.cli("put", "ttl-append.test", "A", "192.0.2.1", "--ttl", "60").returncode, 0)
+        self.assertNotEqual(self.cli("add", "ttl-append.test", "A", "192.0.2.2").returncode, 0)
+        self.assertEqual(self.cli("add", "ttl-append.test", "A", "192.0.2.2", "--ttl", "60").returncode, 0)
+        result = self.cli("batch", "--item", "put,append-batch.test,A,192.0.2.1",
+            "--item", "add,append-batch.test,A,192.0.2.2", "--item", "get,append-batch.test,A",
+            "--item", "put,append-batch.test,A,192.0.2.3", "--item", "get,append-batch.test,A")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = json.loads(result.stdout)
+        self.assertEqual(len(result[2]["records"]), 2)
+        self.assertEqual(len(result[4]["records"]), 1)
+
+    def test_ordering_mode_cli_and_batch(self):
+        for mode in ("lb", "geo", "random"):
+            name = f"mode-{mode}.test"
+            result = self.cli("put", name, "A", "192.0.2.1", "--mode", mode)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.cli("add", name, "A", "192.0.2.2").returncode, 0)
+            records = json.loads(self.cli("get", name, "A").stdout)["records"]
+            self.assertEqual(len(records), 2)
+            self.assertTrue(all(record["mode"] == mode.upper() for record in records))
+        self.assertEqual(self.cli("put", "mode.test", "A", "192.0.2.1", "--mode", "round").returncode, 2)
+        result = self.cli("batch", "--item", "put,mode-batch.test,A,192.0.2.1,lb",
+            "--item", "add,mode-batch.test,A,192.0.2.2", "--item", "get,mode-batch.test,A")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)[2]["records"][0]["mode"], "LB")
+
+    def test_overlapping_crud_and_delete_one_value(self):
+        import dns.message
+        import dns.query
+        name = "crud-overlap.test"
+        self.assertEqual(self.cli("add", name, "A", "192.0.2.10", "--mode", "lb").returncode, 0)
+        self.assertEqual(self.cli("add", name, "A", "192.0.2.20").returncode, 0)
+        self.assertEqual(self.cli("add", name, "TXT", '"keep"').returncode, 0)
+        records = json.loads(self.cli("get", name, "A").stdout)["records"]
+        self.assertEqual({r["data"] for r in records}, {"192.0.2.10", "192.0.2.20"})
+        self.assertEqual(len(records), 2)
+        result = self.cli("del", name, "A", "192.0.2.10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"delete": 1})
+        records = json.loads(self.cli("get", name, "A").stdout)["records"]
+        self.assertEqual([r["data"] for r in records], ["192.0.2.20"])
+        self.assertEqual(records[0]["mode"], "LB")
+        self.assertEqual(json.loads(self.cli("del", name, "A", "192.0.2.10").stdout), {"delete": 0})
+        reply = dns.query.udp(dns.message.make_query(name, "A"), "127.0.0.1", port=self.server.port, timeout=3)
+        self.assertEqual([r.address for r in reply.answer[0]], ["192.0.2.20"])
+        self.assertEqual(len(json.loads(self.cli("get", name, "TXT").stdout)["records"]), 1)
+        self.assertEqual(self.cli("put", name, "A", "192.0.2.30").returncode, 0)
+        self.assertEqual(json.loads(self.cli("get", name, "A").stdout)["records"][0]["data"], "192.0.2.30")
+        result = self.cli("batch", "--item", "add,crud-overlap.test,A,192.0.2.40",
+            "--item", "get,crud-overlap.test,A", "--item", "del,crud-overlap.test,A,192.0.2.30",
+            "--item", "get,crud-overlap.test,A")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        results = json.loads(result.stdout)
+        self.assertEqual(len(results[1]["records"]), 2)
+        self.assertEqual(results[2], {"delete": 1})
+        self.assertEqual([r["data"] for r in results[3]["records"]], ["192.0.2.40"])
+        self.assertEqual(self.cli("del", name, "A").returncode, 0)
+        self.assertEqual(json.loads(self.cli("get", name, "A").stdout)["records"], [])
+
+    def test_embedded_build_information(self):
+        import datetime
+        help_text = self.cli("--help").stdout
+        self.assertIn("Version: ", help_text)
+        self.assertIn("Commit: ", help_text)
+        stamp = next(line.removeprefix("Built: ") for line in help_text.splitlines() if line.startswith("Built: "))
+        self.assertIsNotNone(datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).tzinfo)
+        self.assertIn("Built: " + stamp, self.cli("--version").stdout)
+
+    def test_delete_one_typed_and_raw_value(self):
+        for kind, first, second, raw in [("TXT", '"first value"', '"second value"', False),
+                                         ("MX", "10 mail1.test.", "20 mail2.test.", False),
+                                         ("TYPE65280", "AQ==", "Ag==", True)]:
+            name = f"delete-value-{kind.lower()}.test"
+            flags = ["--raw"] if raw else []
+            self.assertEqual(self.cli("put", name, kind, first, *flags).returncode, 0)
+            self.assertEqual(self.cli("add", name, kind, second, *flags).returncode, 0)
+            result = self.cli("del", name, kind, first, *flags)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"delete": 1})
+            self.assertEqual(len(json.loads(self.cli("get", name, kind).stdout)["records"]), 1)
+            self.assertEqual(json.loads(self.cli("del", name, kind, first, *flags).stdout), {"delete": 0})

@@ -15,7 +15,7 @@ from support import Server, ROOT, available_port
 
 class ConfigTests(unittest.TestCase):
     def test_missing_and_mismatched_certificates(self):
-        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         for proto in ("doh", "dot", "doq"):
             for args in ([f"--{proto}", "127.0.0.1:8853"], [f"--{proto}", "127.0.0.1:8853", f"--{proto}-cert", "cert.pem"],
                          [f"--{proto}-cert", "cert.pem", f"--{proto}-key", "key.pem"]):
@@ -26,7 +26,7 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("--https-listen-addr", result.stdout)
 
     def test_listener_requires_address_and_port(self):
-        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         for proto in ("dns", "doh", "dot", "doq"):
             for values in ([], ["127.0.0.1"], ["127.0.0.1:invalid"]):
                 with self.subTest(protocol=proto, values=values):
@@ -35,7 +35,7 @@ class ConfigTests(unittest.TestCase):
                     self.assertIn(f"--{proto} <ADDRESS:PORT>", result.stderr)
 
     def test_proxy_flags_conflict_with_tls_credentials(self):
-        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         for proto in ("doh", "dot"):
             for extra in ([f"--{proto}-cert", "cert.pem"], [f"--{proto}-key", "key.pem"]):
                 result = subprocess.run([binary, f"--{proto}", "127.0.0.1:853",
@@ -43,7 +43,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
 
     def test_removed_management_flags_and_default_listen(self):
-        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuck"))
+        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
         for args in (["--graphql"], ["--api-token", "removed"]):
             result = subprocess.run([binary, *args], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -97,3 +97,13 @@ class ConfigTests(unittest.TestCase):
                         process.communicate()
                         raise
                     self.assertEqual(process.returncode, 0, (out, err))
+
+    def test_embedded_build_information(self):
+        import datetime
+        binary = os.environ.get("DNS_TEST_BINARY", str(ROOT / "target/debug/dnsuckd"))
+        help_text = subprocess.check_output([binary, "--help"], text=True)
+        self.assertIn("Version: ", help_text)
+        self.assertIn("Commit: ", help_text)
+        stamp = next(line.removeprefix("Built: ") for line in help_text.splitlines() if line.startswith("Built: "))
+        self.assertIsNotNone(datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).tzinfo)
+        self.assertIn("Built: " + stamp, subprocess.check_output([binary, "--version"], text=True))

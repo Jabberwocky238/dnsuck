@@ -71,3 +71,20 @@ impl RecordInput {
 pub fn decode_inputs(inputs: Vec<RecordInput>) -> Result<Vec<Record>> {
     inputs.into_iter().map(RecordInput::into_record).collect()
 }
+
+/// Ordering changes only the order of records, never their membership.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, async_graphql::Enum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderMode {
+    Lb,
+    Geo,
+    Random,
+}
+
+pub type OrderModes = std::collections::BTreeMap<(String, u16), OrderMode>;
+
+pub(crate) fn mode_key(name: &str, kind: RecordType) -> String {
+    format!("mode:{}:{name}", u16::from(kind))
+}

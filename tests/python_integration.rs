@@ -13,7 +13,7 @@ fn python_dns_end_to_end() {
         "test_*.py",
         "-v",
     ])
-    .env("DNS_TEST_BINARY", env!("CARGO_BIN_EXE_dnsuck"))
+    .env("DNS_TEST_BINARY", env!("CARGO_BIN_EXE_dnsuckd"))
     .status()
     .expect("Python 3 is required for the DNS integration tests");
     assert!(status.success(), "Python DNS integration tests failed");

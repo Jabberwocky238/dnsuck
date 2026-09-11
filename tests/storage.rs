@@ -86,3 +86,105 @@ fn structured_inputs_and_atomic_rrset_updates() -> anyhow::Result<()> {
     assert!(input("bad.test", "ANY", "invalid").into_record().is_err());
     Ok(())
 }
+
+#[test]
+fn appends_are_atomic_distinct_and_do_not_lose_concurrent_writes() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    let records = || {
+        dnsuck::decode_inputs(vec![
+            input("append.test", "A", "192.0.2.1"),
+            input("append.test", "A", "192.0.2.2"),
+            input("APPEND.TEST.", "A", "192.0.2.1"),
+        ])
+    };
+    assert_eq!(store.add_records(records()?)?, 2);
+    let revision = store.revision()?;
+    assert_eq!(store.add_records(records()?)?, 0);
+    assert_eq!(store.revision()?, revision);
+    let mut mismatched = input("append.test", "A", "192.0.2.1");
+    mismatched.ttl = 90;
+    assert!(
+        store
+            .add_records(dnsuck::decode_inputs(vec![
+                input("a-valid.test", "TXT", "\"rollback\""),
+                mismatched,
+            ])?)
+            .is_err()
+    );
+    assert!(store.records("a-valid.test")?.is_empty());
+    assert_eq!(store.revision()?, revision);
+    assert!(
+        store
+            .add_records(dnsuck::decode_inputs(vec![input(
+                "append.test",
+                "CNAME",
+                "target.test."
+            ),])?)
+            .is_err()
+    );
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (3..=14)
+            .map(|last| {
+                let store = &store;
+                scope.spawn(move || {
+                    store
+                        .add_records(dnsuck::decode_inputs(vec![input(
+                            "append.test",
+                            "A",
+                            &format!("192.0.2.{last}"),
+                        )])?)
+                        .map(|_| ())
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap()?;
+        }
+        anyhow::Ok(())
+    })?;
+    assert_eq!(
+        store.lookup("append.test", RecordType::A)?.unwrap().len(),
+        14
+    );
+    store.put_records(dnsuck::decode_inputs(vec![input(
+        "append.test",
+        "A",
+        "192.0.2.99",
+    )])?)?;
+    assert_eq!(
+        store.lookup("append.test", RecordType::A)?.unwrap().len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn reader_slots_are_released_between_blocking_workers() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    store.put("readers.test", "192.0.2.1".parse()?, 300)?;
+    // Keep more workers alive than LMDB's default reader limit, with only one
+    // transaction active at a time. Idle threads must not retain reader slots.
+    let barrier = std::sync::Barrier::new(161);
+    let (send, receive) = std::sync::mpsc::channel();
+    let results = std::thread::scope(|scope| {
+        let mut results = Vec::new();
+        for _ in 0..160 {
+            let (store, barrier, send) = (&store, &barrier, send.clone());
+            scope.spawn(move || {
+                let result = store.lookup("readers.test", RecordType::A);
+                send.send(result.map(|records| records.unwrap().len()))
+                    .unwrap();
+                barrier.wait();
+            });
+            results.push(receive.recv().unwrap());
+        }
+        barrier.wait();
+        results
+    });
+    for result in results {
+        assert_eq!(result?, 1);
+    }
+    Ok(())
+}

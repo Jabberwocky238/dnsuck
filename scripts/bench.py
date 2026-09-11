@@ -70,7 +70,7 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.queries <= min(args.records, 65536) or args.window < 1 or args.seconds <= 0:
         parser.error("require 1 <= queries <= min(records, 65536), window > 0, seconds > 0")
-    binary = ROOT / "target/release/dnsuck"
+    binary = ROOT / "target/release/dnsuckd"
     templates = [(rrset.rdtype, next(iter(rrset))) for rrset in expected_rrsets()]
     rng = random.Random(args.seed)
     samples = rng.sample(range(args.records), args.queries)
@@ -142,6 +142,8 @@ def main():
                 process.kill()
                 process.communicate()
                 raise RuntimeError("server shutdown timed out")
+            if stderr.strip():
+                print(stderr, file=sys.stderr)
             if process.returncode != 0:
                 raise RuntimeError((stdout, stderr))
     wire_seconds = elapsed

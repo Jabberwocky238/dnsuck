@@ -30,8 +30,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config python3-venv
-      - run: ./doctor.sh
-      - run: cargo build --release --workspace --locked
+      - run: ./doctor.sh --skip-mmdb
+      - name: Build release binaries
+        env:
+          DNSUCK_RELEASE_VERSION: ${{ github.ref_name }}
+        run: cargo build --release --workspace --locked
       - name: Package binaries
         env:
           RELEASE_TAG: ${{ github.ref_name }}

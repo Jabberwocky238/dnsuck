@@ -11,9 +11,9 @@ mkdir -p "$output"
 output=$(cd "$output" && pwd)
 staging=$(mktemp -d)
 trap 'rm -rf -- "$staging"' EXIT
-install -m 755 target/release/dnsuck target/release/cmd "$staging/"
+install -m 755 target/release/dnsuckd target/release/dnsuck "$staging/"
 printf '%s\n' "$release" > "$staging/VERSION"
 asset="dnsuck-$target.tar.gz"
-tar -czf "$output/$asset" -C "$staging" dnsuck cmd VERSION
+tar -czf "$output/$asset" -C "$staging" dnsuckd dnsuck VERSION
 cd "$output"
 if command -v sha256sum >/dev/null; then sha256sum "$asset" > "$asset.sha256"; else shasum -a 256 "$asset" > "$asset.sha256"; fi
