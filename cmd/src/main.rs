@@ -51,6 +51,7 @@ struct WriteArgs {
     /// Order all returned records: best-effort lb, geo country match, or random.
     #[arg(long, value_enum)]
     mode: Option<OrderMode>,
+    /// Exact name, * (one layer), or parenthesized Rust regex segments, e.g. (.+).
     domain: String,
     record_type: String,
     value: String,

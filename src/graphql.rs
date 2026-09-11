@@ -1,6 +1,6 @@
 use crate::{RecordInput, decode_inputs, records::OrderMode, resolver::Resolver};
 use async_graphql::{Context, EmptySubscription, Object, Schema, SimpleObject};
-use hickory_server::proto::rr::{Record, RecordType};
+use hickory_server::proto::rr::RecordType;
 use std::sync::Arc;
 
 pub type ManagementSchema = Schema<Query, Mutation, EmptySubscription>;
@@ -21,10 +21,10 @@ pub struct DnsRecord {
     data: String,
     mode: Option<OrderMode>,
 }
-impl From<Record> for DnsRecord {
-    fn from(record: Record) -> Self {
+impl From<crate::records::StoredRecord> for DnsRecord {
+    fn from(record: crate::records::StoredRecord) -> Self {
         Self {
-            name: crate::records::name_text(&record.name),
+            name: record.key.clone(),
             record_type: domain::base::iana::Rtype::from(u16::from(record.record_type()))
                 .to_string(),
             ttl: record.ttl,
@@ -59,10 +59,7 @@ impl Query {
             .filter(|r| kind.is_none_or(|kind| kind == RecordType::ANY || kind == r.record_type()))
             .map(|record| {
                 let mode = modes
-                    .get(&(
-                        crate::records::name_text(&record.name),
-                        u16::from(record.record_type()),
-                    ))
+                    .get(&(record.key.clone(), u16::from(record.record_type())))
                     .copied();
                 let mut result = DnsRecord::from(record);
                 result.mode = mode;

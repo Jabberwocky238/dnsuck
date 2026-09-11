@@ -20,6 +20,8 @@ libc = "0.2.189"
 lmdb = "0.8.0"
 maxminddb = "0.31.0"
 rand = "0.10.2"
+regex = "1.13.1"
+regex-syntax = "0.8.11"
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }

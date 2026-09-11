@@ -783,6 +783,8 @@ dependencies = [
  "lmdb",
  "maxminddb",
  "rand",
+ "regex",
+ "regex-syntax",
  "rustls",
  "rustls-pemfile",
  "serde",

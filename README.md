@@ -60,7 +60,7 @@ dnsuck put app.test A 192.0.2.20
 dnsuck add app.test A 192.0.2.21 --mode lb
 dnsuck put app.test AAAA 2001:db8::20 --ttl 60
 dnsuck put app.test TXT '"hello world"'
-dnsuck put '*.jjj.*.fff.*.exp.com' A 192.0.2.30
+dnsuck put '([a-z]+).jjj.([0-9]+).fff.*.exp.com' A 192.0.2.30
 dnsuck get app.test A
 dnsuck del app.test A 192.0.2.20
 dnsuck batch --item "put,app.test,A,192.0.2.20" --item "get,app.test,A"
@@ -76,11 +76,11 @@ Local writes: `dnsuckd put NAME IP [TTL]`, `dnsuckd record NAME TYPE VALUE`, or 
 
 ## LMDB and DNSSEC
 
-LMDB is the only record store; no zone files. The `records` database maps lowercase fully qualified names to all their records, encoded as `DNS1` plus a Hickory DNS wire message. Reads filter by type; CNAME lookups follow target keys. Put replaces supplied RRsets; add appends distinct values. Deletes remove one value, a type, or a whole name. Batches commit atomically with the `metadata[revision]` big-endian u64 counter. Ordering modes use `metadata[mode:TYPE:NAME]`; cursors are not persisted. Whole-label `*` matches exactly one label; `**` matches one or more, never zero. Both may repeat at any depth, e.g. `*.*.*.example.com` or `**.dfsdfsdf.**.example.com`. Exact names win, then more fixed labels, then more `*` labels; ties compare specificity right-to-left, then canonical keys alphabetically. Type misses never fall back. Patterns remain LMDB keys; the in-memory matching index follows the revision counter.
+LMDB is the only record store; no zone files. `records` keys are canonical exact names or pattern strings (literal labels lowercase; regex case/escapes preserved). Values remain `DNS1` plus a Hickory wire message; pattern values use a root owner placeholder, replaced by the queried name in responses. Add appends distinct values; put replaces supplied RRsets. Deletes remove one value, a type, or a name. Batches commit atomically with `metadata[revision]` (big-endian u64); modes use `metadata[mode:TYPE:NAME]`. Compiled patterns and lb cursors live in memory.
 
-DNSSEC uses `--dnssec-zone DOMAIN --dnssec-key-file PATH` with an ECDSA P-256 PKCS#8 PEM key. Apex SOA/NS records must exist in LMDB. Hickory generates signatures and negative-answer proofs; public trust requires a parent DS record. Nested patterns extend [standard wildcard semantics](https://www.rfc-editor.org/rfc/rfc4592.html): concrete owners are signed on demand, and template zones use zero negative-cache TTL to prevent cached denial proofs hiding other matches.
+Use `*` for exactly one label (equivalent to `([^.]+)`), `(.+)` for one or more layers, or other parenthesized [Rust regex](https://docs.rs/regex/latest/regex/#syntax) segments anywhere. Matching covers the whole name, without its trailing dot, and ignores case by default; dots outside groups are literal. Exact names win, then patterns with more literal labels, then alphabetical keys. Type misses never fall back. Invalid regex rejects the whole write. `**` is removed; existing keys migrate atomically to `(.+)` on startup (collisions abort without changing data).
 
-## Releases
+DNSSEC uses `--dnssec-zone DOMAIN --dnssec-key-file PATH` with an ECDSA P-256 PKCS#8 PEM key. Apex SOA/NS records must exist in LMDB. Hickory generates signatures and negative-answer proofs; public trust requires a parent DS record. Regex patterns extend [standard wildcard semantics](https://www.rfc-editor.org/rfc/rfc4592.html): concrete owners are signed on demand, and servers with patterns use zero negative-cache TTL to prevent cached denial proofs hiding other matches.
 
 [CI](.github/workflows/ci.yaml) checks every push on Linux x86-64 and ARM64. Pushing a tag such as `v0.1.0` runs the same checks before [publishing binaries](.github/workflows/release.yml).
 

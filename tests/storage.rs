@@ -190,68 +190,122 @@ fn reader_slots_are_released_between_blocking_workers() -> anyhow::Result<()> {
 }
 
 #[test]
-fn wildcard_depth_and_specificity_are_not_limited_to_the_leftmost_label() -> anyhow::Result<()> {
+fn regex_templates_preserve_keys_and_exact_overrides() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let store = Store::open(dir.path())?;
-    let pattern = format!("{}deep.test", "*.".repeat(80));
-    let query = format!("{}deep.test", "x.".repeat(80));
-    assert!(store.lookup(&query, RecordType::A)?.is_none());
-    store.put(&pattern, "192.0.2.1".parse()?, 60)?;
-    let records = store.lookup(&query, RecordType::A)?.unwrap();
-    assert_eq!(records.len(), 1);
+    let pattern = r"([a-z]+).literal.([0-9]+).test";
+    store.put(pattern, "192.0.2.1".parse()?, 60)?;
+    let query = "abc.literal.123.test";
+    let records = store.lookup(query, RecordType::A)?.unwrap();
     assert_eq!(records[0].name.to_ascii(), format!("{query}."));
-    assert_eq!(store.records(&pattern)?.len(), 1);
-    assert!(store.records(&query)?.is_empty());
-    assert!(
-        store
-            .lookup(&format!("x.{query}"), RecordType::A)?
-            .is_none()
-    );
-    store.put("*.*.*.example.com", "192.0.2.9".parse()?, 60)?;
-    assert_eq!(
-        store
-            .lookup("a.b.c.example.com", RecordType::A)?
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(store.lookup("a.b.example.com", RecordType::A)?.is_none());
-    assert!(
-        store
-            .lookup("a.b.c.d.example.com", RecordType::A)?
-            .is_none()
-    );
-    // More fixed labels win even when their rightmost fixed label is farther left.
-    store.put("a.b.*.rank.test", "192.0.2.2".parse()?, 60)?;
-    store.put("*.*.c.rank.test", "192.0.2.3".parse()?, 60)?;
-    let records = store.lookup("a.b.c.rank.test", RecordType::A)?.unwrap();
-    assert!(matches!(&records[0].data, RData::A(ip) if ip.to_string() == "192.0.2.2"));
-    // Exact names block wildcard fallback regardless of the requested type.
-    store.put(&query, "2001:db8::1".parse()?, 60)?;
-    assert!(store.lookup(&query, RecordType::A)?.unwrap().is_empty());
-    store.delete(&query, None)?;
-    assert_eq!(store.lookup(&query, RecordType::A)?.unwrap().len(), 1);
-    store.delete(&pattern, None)?;
-    assert!(store.lookup(&query, RecordType::A)?.is_none());
+    assert_eq!(store.records(pattern)?[0].key, format!("{pattern}."));
+    assert!(store.records(query)?.is_empty());
+    store.put(query, "2001:db8::1".parse()?, 60)?;
+    assert!(store.lookup(query, RecordType::A)?.unwrap().is_empty());
+    store.delete(query, None)?;
+    assert_eq!(store.lookup(query, RecordType::A)?.unwrap().len(), 1);
+    store.delete(pattern, None)?;
+    assert!(store.lookup(query, RecordType::A)?.is_none());
     Ok(())
 }
 
 #[test]
-fn repeated_globstars_reuse_states_and_preserve_canonical_keys() -> anyhow::Result<()> {
+fn star_is_single_layer_and_double_star_is_replaced_by_regex() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let store = Store::open(dir.path())?;
-    let pattern = format!("{}glob.test", "**.".repeat(30));
-    let query = format!("{}glob.test", "x.".repeat(80));
-    store.put(&pattern, "192.0.2.8".parse()?, 60)?;
-    assert_eq!(store.lookup(&query, RecordType::A)?.unwrap().len(), 1);
-    assert!(
+    store.put("*.deep.test", "192.0.2.8".parse()?, 60)?;
+    let nested = format!("{}nested.test", "(.).".repeat(80));
+    store.put(&nested, "192.0.2.7".parse()?, 60)?;
+    assert_eq!(
         store
-            .lookup(&format!("{}glob.test", "x.".repeat(29)), RecordType::A)?
-            .is_none()
+            .lookup(&format!("{}nested.test", "x.".repeat(80)), RecordType::A)?
+            .unwrap()
+            .len(),
+        1
     );
-    assert_eq!(store.names("**.", "", 10)?, vec![format!("{pattern}.")]);
-    assert_eq!(store.records(&pattern)?.len(), 1);
-    store.delete(&pattern, None)?;
+    let query = format!("{}deep.test", "x.".repeat(80));
     assert!(store.lookup(&query, RecordType::A)?.is_none());
+    assert_eq!(
+        store.lookup("x.deep.test", RecordType::A)?.unwrap().len(),
+        1
+    );
+    store.put("(.+).multi.test", "192.0.2.6".parse()?, 60)?;
+    assert_eq!(
+        store
+            .lookup(&format!("{}multi.test", "x.".repeat(80)), RecordType::A)?
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store.lookup("deep.test", RecordType::A)?.is_none());
+    assert!(store.put("**.deep.test", "192.0.2.9".parse()?, 60).is_err());
+    assert_eq!(store.names("*.", "", 10)?, vec!["*.deep.test."]);
+    Ok(())
+}
+
+#[test]
+fn persisted_double_stars_migrate_atomically_with_modes() -> anyhow::Result<()> {
+    use hickory_server::proto::{
+        op::{Message, MessageType, OpCode},
+        rr::{Name, Record, rdata::A},
+    };
+    use lmdb::{DatabaseFlags, Environment, Transaction, WriteFlags};
+    for collision in [false, true] {
+        let dir = tempfile::tempdir()?;
+        let old = "**.legacy.test.";
+        let new = "(.+).legacy.test.";
+        {
+            let env = Environment::new()
+                .set_max_dbs(2)
+                .set_map_size(64 * 1024 * 1024)
+                .open(dir.path())?;
+            let records = env.create_db(Some("records"), DatabaseFlags::empty())?;
+            let meta = env.create_db(Some("metadata"), DatabaseFlags::empty())?;
+            let mut message = Message::new(0, MessageType::Response, OpCode::Query);
+            message.answers.push(Record::from_rdata(
+                Name::root(),
+                60,
+                RData::A(A("192.0.2.8".parse()?)),
+            ));
+            let mut bytes = b"DNS1".to_vec();
+            bytes.extend(message.to_vec()?);
+            let mut txn = env.begin_rw_txn()?;
+            txn.put(records, &old, &bytes, WriteFlags::empty())?;
+            if collision {
+                txn.put(records, &new, &bytes, WriteFlags::empty())?;
+            }
+            txn.put(
+                meta,
+                &"mode:1:**.legacy.test.",
+                &br#""lb""#.to_vec(),
+                WriteFlags::empty(),
+            )?;
+            txn.put(meta, &"revision", &7u64.to_be_bytes(), WriteFlags::empty())?;
+            txn.commit()?;
+        }
+        if collision {
+            assert!(Store::open(dir.path()).is_err());
+            let env = Environment::new().set_max_dbs(2).open(dir.path())?;
+            let db = env.open_db(Some("records"))?;
+            let txn = env.begin_ro_txn()?;
+            assert!(txn.get(db, &old).is_ok());
+            assert!(txn.get(db, &new).is_ok());
+        } else {
+            let store = Store::open(dir.path())?;
+            assert_eq!(store.names("", "", 10)?, vec![new]);
+            assert_eq!(
+                store
+                    .lookup("a.b.legacy.test", RecordType::A)?
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(store.revision()?, 8);
+            assert_eq!(
+                store.modes()?[&(new.into(), 1)],
+                dnsuck::records::OrderMode::Lb
+            );
+        }
+    }
     Ok(())
 }

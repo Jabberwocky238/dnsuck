@@ -1,4 +1,4 @@
-"""Single-label wildcard templates across DNS transports, storage and management."""
+"""Regex domain templates across DNS transports, storage and management."""
 import asyncio
 import os
 import subprocess
@@ -58,133 +58,125 @@ class WildcardTests(unittest.TestCase):
             self.validate(response.answer)
         return response
 
-    def test_nested_patterns_and_signed_transports(self):
+    def test_regex_segments_all_transports_and_signatures(self):
         for suffix in ("exp.com", "secure.test"):
-            pattern = f"*.jjj.*.fff.*.{suffix}"
+            pattern = f"([a-z]+).jjj.([0-9]+).fff.(.+).{suffix}"
             self.server.upsert([record(pattern, "A", "192.0.2.1"), record(pattern, "A", "192.0.2.2")])
             for transport in ("udp", "tcp", "doh", "dot", "doq"):
-                with self.subTest(suffix=suffix, transport=transport):
-                    self.address(f"a.jjj.b.fff.c.{suffix}", ["192.0.2.1", "192.0.2.2"], transport, suffix == "secure.test")
-            for name in (f"jjj.b.fff.c.{suffix}", f"a.x.jjj.b.fff.c.{suffix}", f"a.jjj.b.fff.{suffix}"):
-                response = self.query(name)
-                self.assertEqual(response.rcode(), dns.rcode.NXDOMAIN, response)
-                if suffix == "secure.test":
-                    self.validate(response.authority)
-                    self.assertTrue(all(r.ttl == 0 for r in response.authority if r.rdtype == dns.rdatatype.NSEC))
-                    soa = next(r for r in response.authority if r.rdtype == dns.rdatatype.SOA)
-                    self.assertEqual(soa[0].minimum, 0)
-            response = self.query(f"a.jjj.b.fff.c.{suffix}", "MX")
+                self.address(f"abc.jjj.123.fff.a.b.c.{suffix}", ["192.0.2.1", "192.0.2.2"], transport, suffix == "secure.test")
+            for name in (f"123.jjj.123.fff.a.{suffix}", f"abc.jjj.abc.fff.a.{suffix}", f"abc.jjj.123.fff.{suffix}"):
+                self.assertEqual(self.query(name).rcode(), dns.rcode.NXDOMAIN)
+            response = self.query(f"abc.jjj.123.fff.a.{suffix}", "MX")
             self.assertEqual(response.rcode(), dns.rcode.NOERROR)
             self.assertFalse(response.answer)
             if suffix == "secure.test":
                 self.validate(response.authority)
+                self.assertTrue(all(r.ttl == 0 for r in response.authority if r.rdtype == dns.rdatatype.NSEC))
 
-    def test_globstar_matches_one_or_more_labels_in_each_position(self):
-        for suffix in ("example.com", "secure.test"):
-            pattern = f"**.dfsdfsdf.**.{suffix}"
-            self.server.upsert([record(pattern, "A", "192.0.2.5")])
-            for transport in ("udp", "tcp", "doh", "dot", "doq"):
-                for name in (f"a.dfsdfsdf.b.{suffix}", f"a.b.dfsdfsdf.c.d.e.{suffix}"):
-                    self.address(name, ["192.0.2.5"], transport, suffix == "secure.test")
-            for name in (f"dfsdfsdf.{suffix}", f"a.dfsdfsdf.{suffix}", f"dfsdfsdf.a.{suffix}", f"a.other.b.{suffix}"):
-                self.assertEqual(self.query(name).rcode(), dns.rcode.NXDOMAIN)
-            query = self.server.graphql("query($name:String!){records(name:$name){name}}", {"name":pattern})
-            self.assertEqual(query.json()["data"]["records"][0]["name"], pattern + ".")
-
-    def test_globstar_single_star_and_exact_precedence(self):
+    def test_star_is_one_layer_and_regex_covers_multiple_layers(self):
         self.server.upsert([
-            record("**.mixed.test", "A", "192.0.2.1"),
-            record("*.mixed.test", "A", "192.0.2.2"),
-            record("**.*.mixed.test", "A", "192.0.2.3"),
-            record("exact.mixed.test", "A", "192.0.2.4"),
-            record("**.**.adjacent-glob.test", "A", "192.0.2.5"),
+            record("*.df.(.+).star.test", "A", "192.0.2.1"),
+            record("([^.]+).single.test", "A", "192.0.2.2"),
+            record("*.*.*.three.test", "A", "192.0.2.3"),
         ])
-        self.address("one.mixed.test", ["192.0.2.2"])
-        self.address("a.b.c.mixed.test", ["192.0.2.3"])
-        self.address("exact.mixed.test", ["192.0.2.4"])
-        self.address("a.b.adjacent-glob.test", ["192.0.2.5"])
-        self.address("a.b.c.d.adjacent-glob.test", ["192.0.2.5"])
-        self.assertEqual(self.query("a.adjacent-glob.test").rcode(), dns.rcode.NXDOMAIN)
-        self.assertEqual(self.query("mixed.test").rcode(), dns.rcode.NXDOMAIN)
+        self.address("a.df.c.d.e.star.test", ["192.0.2.1"])
+        self.address("a.df.b.star.test", ["192.0.2.1"])
+        self.address("a.single.test", ["192.0.2.2"])
+        self.address("a.b.c.three.test", ["192.0.2.3"])
+        self.address(r"a\.b.c.d.three.test", ["192.0.2.3"])
+        for name in ("df.star.test", "a.df.star.test", "df.a.star.test", "a.b.single.test", "a.b.three.test", "a.b.c.d.three.test", "a.b.df.c.star.test"):
+            self.assertEqual(self.query(name).rcode(), dns.rcode.NXDOMAIN)
 
-    def test_precedence_and_no_type_fallback(self):
-        for suffix in ("precedence.test", "precedence.secure.test"):
-            self.server.upsert([
-                record(f"*.*.{suffix}", "A", "192.0.2.1"),
-                record(f"a.*.{suffix}", "A", "192.0.2.2"),
-                record(f"*.b.{suffix}", "A", "192.0.2.3"),
-                record(f"exact.b.{suffix}", "TXT", '"exact"'),
-                record(f"*.txt.{suffix}", "TXT", '"specific"'),
-            ])
-            self.address(f"A.B.{suffix}", ["192.0.2.3"], signed="secure" in suffix)
-            self.address(f"a.c.{suffix}", ["192.0.2.2"])
-            for name in (f"exact.b.{suffix}", f"a.txt.{suffix}"):
-                response = self.query(name)
-                self.assertEqual(response.rcode(), dns.rcode.NOERROR)
-                self.assertFalse(response.answer)
+    def test_nested_groups_classes_escapes_and_regex_case_are_preserved(self):
+        self.server.upsert([
+            record(r"((api|www)[0-9]{1,3}).nested.test", "A", "192.0.2.1"),
+            record(r"(\D+).classes.test", "A", "192.0.2.2"),
+            record(r"((?:a\.)+b).cross.test", "A", "192.0.2.3"),
+            record(r"([a-z()]+).bracket.test", "A", "192.0.2.4"),
+        ])
+        self.address("API12.nested.test", ["192.0.2.1"])
+        self.address("word.classes.test", ["192.0.2.2"])
+        self.address("a.a.b.cross.test", ["192.0.2.3"])
+        self.address("abc.bracket.test", ["192.0.2.4"])
+        self.assertEqual(self.query("123.classes.test").rcode(), dns.rcode.NXDOMAIN)
+        self.assertEqual(self.query("api1234.nested.test").rcode(), dns.rcode.NXDOMAIN)
+        result = self.server.graphql("query($name:String!){records(name:$name){name}}", {"name":r"(\D+).classes.test"}).json()
+        self.assertEqual(result["data"]["records"][0]["name"], r"(\D+).classes.test.")
 
-    def test_all_rdata_types_keep_payload_and_ttl(self):
-        records = inputs()
-        for index, value in enumerate(records):
-            value["name"] = f"*.kind{index}.*.types.test"
-        self.server.upsert(records)
-        for index, value in enumerate(records):
-            name = f"a.kind{index}.b.types.test"
-            response = self.query(name, value["recordType"])
-            stored = self.query(value["name"], value["recordType"])
-            self.assertEqual(response.rcode(), dns.rcode.NOERROR, response)
-            self.assertEqual(response.answer[0].name, dns.name.from_text(name))
-            self.assertEqual(response.answer[0].ttl, value["ttl"])
-            self.assertEqual(set(response.answer[0]), set(stored.answer[0]))
+    def test_exact_priority_literal_dots_and_no_type_fallback(self):
+        self.server.upsert([
+            record("(.+).priority.test", "A", "192.0.2.1"),
+            record("(.+).specific.priority.test", "TXT", '"specific"'),
+            record("exact.priority.test", "TXT", '"exact"'),
+            record("([a-z]+).literal.test", "A", "192.0.2.2"),
+        ])
+        for name in ("exact.priority.test", "x.specific.priority.test"):
+            response = self.query(name)
+            self.assertEqual(response.rcode(), dns.rcode.NOERROR)
+            self.assertFalse(response.answer)
+        self.assertEqual(self.query("abclliteral.test").rcode(), dns.rcode.NXDOMAIN)
+        self.address("abc.literal.test", ["192.0.2.2"])
 
-    def test_cname_targets_and_ordering(self):
+    def test_cname_and_ordering_inherit_the_pattern(self):
         for suffix in ("chain.test", "chain.secure.test"):
-            pattern = f"**.target.**.{suffix}"
-            response = self.server.graphql("mutation($r:[RecordInput!]!){upsert(records:$r,mode:LB)}", {
-                "r": [record(pattern, "A", "192.0.2.1"), record(pattern, "A", "192.0.2.2")]})
-            self.assertNotIn("errors", response.json())
-            self.server.upsert([record(f"*.alias.{suffix}", "CNAME", f"a.target.b.{suffix}.")])
+            pattern = f"(.+).target.(.+).{suffix}"
+            result = self.server.graphql("mutation($r:[RecordInput!]!){upsert(records:$r,mode:LB)}", {
+                "r":[record(pattern, "A", "192.0.2.1"), record(pattern, "A", "192.0.2.2")]})
+            self.assertNotIn("errors", result.json())
+            self.server.upsert([record(f"*.alias.{suffix}", "CNAME", f"a.b.target.c.d.{suffix}.")])
             for index in range(2):
                 response = self.query(f"x.alias.{suffix}")
                 self.assertEqual(response.answer[0].name, dns.name.from_text(f"x.alias.{suffix}"))
                 addresses = next(r for r in response.answer if r.rdtype == dns.rdatatype.A)
-                self.assertEqual([r.address for r in addresses], ["192.0.2.1", "192.0.2.2"][index:] + ["192.0.2.1", "192.0.2.2"][:index])
+                expected = ["192.0.2.1", "192.0.2.2"]
+                self.assertEqual([r.address for r in addresses], expected[index:] + expected[:index])
                 if "secure" in suffix:
                     self.validate(response.answer)
-            # The in-memory lb cursor belongs to the template, even for another query name.
-            self.address(f"other.deep.target.name.with.more.{suffix}", ["192.0.2.1", "192.0.2.2"])
 
-    @unittest.skipUnless(os.environ.get("DNS_TEST_CLI"), "requires built management CLI")
-    def test_cli_crud_restart_and_external_writer_invalidate_index(self):
-        binary = os.environ["DNS_TEST_CLI"]
-        pattern = "**.cli.**.wild.test"
+    def test_all_record_types_keep_payload_and_ttl(self):
+        import base64
+        import dns.rdata
+        records = inputs()
+        for index, value in enumerate(records):
+            value["name"] = f"([a-z]+).kind{index}.([0-9]+).types.test"
+        self.server.upsert(records)
+        for index, value in enumerate(records):
+            name = f"abc.kind{index}.123.types.test"
+            response = self.query(name, value["recordType"])
+            raw = base64.b64decode(value["rdataBase64"])
+            expected = dns.rdata.from_wire(1, dns.rdatatype.from_text(value["recordType"]), raw, 0, len(raw))
+            self.assertEqual(response.rcode(), dns.rcode.NOERROR, response)
+            self.assertEqual(response.answer[0].name, dns.name.from_text(name))
+            self.assertEqual(response.answer[0].ttl, value["ttl"])
+            self.assertEqual(set(response.answer[0]), {expected})
+
+    @unittest.skipUnless(os.environ.get("DNS_TEST_CLI"), "requires built CLI")
+    def test_cli_crud_restart_and_external_writer_invalidate_cache(self):
+        pattern = "([a-z]+).cli.(.+).crud.test"
         def cli(*args):
-            return subprocess.run([binary, "--endpoint", self.server.graphql_url + "/graphql", *args],
+            return subprocess.run([os.environ["DNS_TEST_CLI"], "--endpoint", self.server.graphql_url + "/graphql", *args],
                 text=True, capture_output=True, check=True)
-        self.assertEqual(self.query("a.cli.b.wild.test").rcode(), dns.rcode.NXDOMAIN)
+        self.assertEqual(self.query("a.cli.b.c.crud.test").rcode(), dns.rcode.NXDOMAIN)
         cli("put", pattern, "A", "192.0.2.1")
         cli("add", pattern, "A", "192.0.2.2")
-        self.assertIn(pattern + ".", cli("get", pattern, "A").stdout)
-        self.address("a.cli.b.wild.test", ["192.0.2.1", "192.0.2.2"])
+        self.assertIn(pattern, cli("get", pattern, "A").stdout)
+        self.address("a.cli.b.c.crud.test", ["192.0.2.1", "192.0.2.2"])
         cli("del", pattern, "A", "192.0.2.1")
-        self.address("a.cli.b.wild.test", ["192.0.2.2"])
+        self.address("a.cli.b.c.crud.test", ["192.0.2.2"])
         self.server.stop()
         self.server.start()
-        self.address("a.cli.b.wild.test", ["192.0.2.2"])
+        self.address("a.cli.b.c.crud.test", ["192.0.2.2"])
         cli("del", pattern, "A")
-        self.assertEqual(self.query("a.cli.b.wild.test").rcode(), dns.rcode.NXDOMAIN)
+        self.assertEqual(self.query("a.cli.b.c.crud.test").rcode(), dns.rcode.NXDOMAIN)
         self.server.run("put", pattern, "192.0.2.3", "300")
-        self.address("a.cli.b.wild.test", ["192.0.2.3"])
+        self.address("a.cli.b.c.crud.test", ["192.0.2.3"])
+        cli("batch", "--item", 'put,"([a-z]{1,3}).batch.regex.test",A,192.0.2.4')
+        self.address("abc.batch.regex.test", ["192.0.2.4"])
 
-    def test_adjacent_stars_middle_labels_and_literal_partial_stars(self):
-        self.server.upsert([
-            record("*.*.adjacent.test", "A", "192.0.2.1"),
-            record("fixed.*.middle.test", "A", "192.0.2.2"),
-        ])
-        self.address("a.b.adjacent.test", ["192.0.2.1"])
-        self.address("fixed.a.middle.test", ["192.0.2.2"])
-        invalid = self.server.graphql('mutation{upsert(records:[{name:"partial*.literal.test",recordType:"A",ttl:300,data:"192.0.2.3"}])}')
-        self.assertIn("errors", invalid.json())
-        for name in ("a.adjacent.test", "a.b.c.adjacent.test", "other.a.middle.test", "partialx.literal.test"):
-            self.assertEqual(self.query(name).rcode(), dns.rcode.NXDOMAIN)
-        self.address(r"a\.b.c.adjacent.test", ["192.0.2.1"])
+    def test_invalid_patterns_rollback_entire_batch(self):
+        for pattern in ("**.removed.test", "([a-z).bad.test", "(?=a).bad.test", r"((a)\1).bad.test",
+                        "prefix(a).bad.test", "(a)suffix.bad.test", "(a{1000000000}).bad.test"):
+            result = self.server.graphql("mutation($r:[RecordInput!]!){upsert(records:$r)}", {
+                "r":[record("atomic.regex.test", "A", "192.0.2.1"), record(pattern, "A", "192.0.2.2")]})
+            self.assertIn("errors", result.json(), pattern)
+            self.assertEqual(self.query("atomic.regex.test").rcode(), dns.rcode.NXDOMAIN)

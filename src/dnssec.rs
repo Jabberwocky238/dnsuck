@@ -52,12 +52,15 @@ impl SignedZone {
         {
             return Ok(snapshot.catalog.clone());
         }
-        let (revision, mut records) = store.snapshot()?;
-        // Patterns are templates, not RFC 4592 wildcard owners in the signed zone.
-        let templates = records.iter().any(|record| {
-            self.origin.zone_of(&record.name) && crate::store::has_wildcard(&record.name)
-        });
-        records.retain(|record| !crate::store::has_wildcard(&record.name));
+        let (revision, stored) = store.snapshot()?;
+        let templates = stored
+            .iter()
+            .any(|record| crate::records::is_pattern(&record.key));
+        let records = stored
+            .into_iter()
+            .filter(|record| !crate::records::is_pattern(&record.key))
+            .map(|record| record.record)
+            .collect();
         let catalog = self.build(revision, records, templates)?;
         *cache = Some(Snapshot {
             revision,

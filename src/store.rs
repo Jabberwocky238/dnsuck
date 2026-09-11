@@ -1,4 +1,6 @@
-use crate::records::{OrderMode, OrderModes, canonical, mode_key, parse_name};
+use crate::records::{
+    OrderMode, OrderModes, StoredRecord, canonical, is_pattern, mode_key, parse_name, pattern,
+};
 use anyhow::{Context, Result};
 use hickory_server::proto::{
     op::{Message, MessageType, OpCode},
@@ -16,7 +18,7 @@ pub struct Store {
     env: Environment,
     db: Database,
     meta: Database,
-    wildcards: Mutex<Option<(u64, Wildcards)>>,
+    patterns: Mutex<Option<(u64, Patterns)>>,
 }
 
 impl Store {
@@ -32,12 +34,69 @@ impl Store {
             .context("opening LMDB")?;
         let db = env.create_db(Some("records"), DatabaseFlags::empty())?;
         let meta = env.create_db(Some("metadata"), DatabaseFlags::empty())?;
-        Ok(Self {
+        let store = Self {
             env,
             db,
             meta,
-            wildcards: Mutex::new(None),
-        })
+            patterns: Mutex::new(None),
+        };
+        store.migrate_globstars()?;
+        Ok(store)
+    }
+
+    /// Convert persisted ** keys atomically; no record values or ordering modes are lost.
+    fn migrate_globstars(&self) -> Result<()> {
+        let txn = self.env.begin_ro_txn()?;
+        let mut cursor = txn.open_ro_cursor(self.db)?;
+        let old_keys: Vec<String> = cursor
+            .iter()
+            .filter_map(|(key, _)| {
+                let key = std::str::from_utf8(key).ok()?;
+                (key.contains("**") && !key.contains('(')).then(|| key.to_owned())
+            })
+            .collect();
+        drop(cursor);
+        drop(txn);
+        if old_keys.is_empty() {
+            return Ok(());
+        }
+        let mut txn = self.env.begin_rw_txn()?;
+        for old in old_keys {
+            if matches!(txn.get(self.db, &old), Err(lmdb::Error::NotFound)) {
+                continue;
+            }
+            let key = canonical(&old.replace("**", "(.+)"))?;
+            anyhow::ensure!(
+                matches!(txn.get(self.db, &key), Err(lmdb::Error::NotFound)),
+                "cannot migrate {old}: target {key} already exists"
+            );
+            let mut records = decode(&old, txn.get(self.db, &old)?)?;
+            for record in &mut records {
+                record.name = Name::root();
+            }
+            let mut message = Message::new(0, MessageType::Response, OpCode::Query);
+            message.answers = records;
+            let mut bytes = b"DNS1".to_vec();
+            bytes.extend(message.to_vec()?);
+            txn.put(self.db, &key, &bytes, WriteFlags::empty())?;
+            txn.del(self.db, &old, None)?;
+            for record in message.answers {
+                let old_mode = mode_key(&old, record.record_type());
+                if let Ok(mode) = txn.get(self.meta, &old_mode) {
+                    let mode = mode.to_vec();
+                    txn.put(
+                        self.meta,
+                        &mode_key(&key, record.record_type()),
+                        &mode,
+                        WriteFlags::empty(),
+                    )?;
+                    txn.del(self.meta, &old_mode, None)?;
+                }
+            }
+        }
+        self.bump_revision(&mut txn)?;
+        txn.commit()?;
+        Ok(())
     }
 
     /// Replace the address RRset of the same family, preserving other types.
@@ -46,27 +105,32 @@ impl Store {
             IpAddr::V4(ip) => RData::A(A(ip)),
             IpAddr::V6(ip) => RData::AAAA(AAAA(ip)),
         };
-        self.put_records(vec![Record::from_rdata(
-            parse_name(&canonical(name)?)?,
-            ttl,
-            data,
-        )])?;
+        let key = canonical(name)?;
+        let owner = if is_pattern(&key) {
+            Name::root()
+        } else {
+            parse_name(&key)?
+        };
+        self.put_records(vec![StoredRecord {
+            key,
+            record: Record::from_rdata(owner, ttl, data),
+        }])?;
         Ok(())
     }
 
     /// Atomically replace the supplied RRsets, preserving other names/types.
-    pub fn put_records(&self, records: Vec<Record>) -> Result<usize> {
+    pub fn put_records(&self, records: Vec<StoredRecord>) -> Result<usize> {
         self.write_records(records, true, None)
     }
 
     /// Append distinct records atomically, preserving existing RRsets.
-    pub fn add_records(&self, records: Vec<Record>) -> Result<usize> {
+    pub fn add_records(&self, records: Vec<StoredRecord>) -> Result<usize> {
         self.write_records(records, false, None)
     }
 
     pub fn write_records(
         &self,
-        records: Vec<Record>,
+        records: Vec<StoredRecord>,
         replace: bool,
         mode: Option<OrderMode>,
     ) -> Result<usize> {
@@ -74,9 +138,14 @@ impl Store {
         let mut added = 0;
         let mut changed = false;
         let mut groups: BTreeMap<String, Vec<Record>> = BTreeMap::new();
-        for mut record in records {
-            let key = canonical(&record.name.to_ascii())?;
-            record.name = parse_name(&key)?;
+        for input in records {
+            let key = canonical(&input.key)?;
+            let mut record = input.record;
+            record.name = if is_pattern(&key) {
+                Name::root()
+            } else {
+                parse_name(&key)?
+            };
             groups.entry(key).or_default().push(record);
         }
         let mut txn = self.env.begin_rw_txn()?;
@@ -202,26 +271,36 @@ impl Store {
         self.revision_in(&self.env.begin_ro_txn()?)
     }
 
-    pub fn snapshot(&self) -> Result<(u64, Vec<Record>)> {
+    pub fn snapshot(&self) -> Result<(u64, Vec<StoredRecord>)> {
         let txn = self.env.begin_ro_txn()?;
         self.snapshot_in(&txn)
     }
 
-    fn snapshot_in(&self, txn: &impl Transaction) -> Result<(u64, Vec<Record>)> {
+    fn snapshot_in(&self, txn: &impl Transaction) -> Result<(u64, Vec<StoredRecord>)> {
         let revision = self.revision_in(txn)?;
         let mut cursor = txn.open_ro_cursor(self.db)?;
         let mut records = Vec::new();
         for (key, bytes) in cursor.iter() {
-            records.extend(decode(std::str::from_utf8(key)?, bytes)?);
+            let key = std::str::from_utf8(key)?;
+            records.extend(decode(key, bytes)?.into_iter().map(|record| StoredRecord {
+                key: key.into(),
+                record,
+            }));
         }
         Ok((revision, records))
     }
 
-    pub fn records(&self, name: &str) -> Result<Vec<Record>> {
+    pub fn records(&self, name: &str) -> Result<Vec<StoredRecord>> {
         let key = canonical(name)?;
         let txn = self.env.begin_ro_txn()?;
         match txn.get(self.db, &key) {
-            Ok(bytes) => decode(&key, bytes),
+            Ok(bytes) => Ok(decode(&key, bytes)?
+                .into_iter()
+                .map(|record| StoredRecord {
+                    key: key.clone(),
+                    record,
+                })
+                .collect()),
             Err(lmdb::Error::NotFound) => Ok(Vec::new()),
             Err(error) => Err(error.into()),
         }
@@ -231,7 +310,11 @@ impl Store {
         let txn = self.env.begin_ro_txn()?;
         let mut cursor = txn.open_ro_cursor(self.db)?;
         let mut names = Vec::new();
-        let prefix = prefix.to_ascii_lowercase();
+        let prefix = if is_pattern(prefix) {
+            prefix.to_owned()
+        } else {
+            prefix.to_ascii_lowercase()
+        };
         for (key, _) in cursor.iter() {
             let name = std::str::from_utf8(key)?;
             if name > after && name.starts_with(&prefix) {
@@ -248,12 +331,8 @@ impl Store {
         self.delete_matching(name, kind, None)
     }
 
-    pub fn delete_record(&self, record: &Record) -> Result<usize> {
-        self.delete_matching(
-            &record.name.to_ascii(),
-            Some(record.record_type()),
-            Some(&record.data),
-        )
+    pub fn delete_record(&self, record: &StoredRecord) -> Result<usize> {
+        self.delete_matching(&record.key, Some(record.record_type()), Some(&record.data))
     }
 
     fn delete_matching(
@@ -306,7 +385,7 @@ impl Store {
         Ok(deleted)
     }
 
-    /// Resolve exact names first, then whole-label wildcard patterns.
+    /// Exact owners win. Regex patterns are compiled once per LMDB revision.
     fn source_in(&self, txn: &impl Transaction, key: &str) -> Result<Option<String>> {
         match txn.get(self.db, &key) {
             Ok(_) => return Ok(Some(key.into())),
@@ -315,33 +394,33 @@ impl Store {
         }
         let revision = self.revision_in(txn)?;
         let mut cached = self
-            .wildcards
+            .patterns
             .lock()
-            .map_err(|_| anyhow::anyhow!("wildcard cache poisoned"))?;
+            .map_err(|_| anyhow::anyhow!("pattern cache poisoned"))?;
         if cached
             .as_ref()
             .is_none_or(|(stored, _)| *stored != revision)
         {
-            let mut index = Wildcards::default();
+            let mut patterns = Vec::new();
             let mut cursor = txn.open_ro_cursor(self.db)?;
             for (key, _) in cursor.iter() {
                 let key = std::str::from_utf8(key)?;
-                // Canonical names escape embedded dots; Hickory owns label parsing.
-                if key.contains('*') {
-                    let name = parse_name(key)?;
-                    if has_wildcard(&name) {
-                        index.insert(&name, key);
-                    }
+                if is_pattern(key) {
+                    let (_, regex, fixed) = pattern(key)?;
+                    patterns.push((fixed, key.to_owned(), regex));
                 }
             }
-            *cached = Some((revision, index));
+            patterns.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            *cached = Some((revision, patterns));
         }
-        let name = parse_name(key)?;
+        let name = key.strip_suffix('.').unwrap_or(key);
         Ok(cached
             .as_ref()
-            .expect("initialized wildcard index")
+            .expect("compiled patterns")
             .1
-            .find(&name))
+            .iter()
+            .find(|(_, _, regex)| regex.is_match(name))
+            .map(|(_, key, _)| key.clone()))
     }
 
     pub(crate) fn sources(&self, records: &[Record]) -> Result<BTreeMap<String, String>> {
@@ -369,8 +448,12 @@ impl Store {
         if synthesized.is_empty() {
             return Ok(None);
         }
-        let (revision, mut records) = self.snapshot_in(&txn)?;
-        records.retain(|record| !has_wildcard(&record.name));
+        let (revision, stored) = self.snapshot_in(&txn)?;
+        let mut records: Vec<_> = stored
+            .into_iter()
+            .filter(|r| !is_pattern(&r.key))
+            .map(|r| r.record)
+            .collect();
         records.extend(synthesized);
         Ok(Some((revision, records)))
     }
@@ -402,7 +485,7 @@ impl Store {
             };
             let mut values = decode(&source, txn.get(self.db, &source)?)?;
             let owner = parse_name(&key)?;
-            if source != key || has_wildcard(&owner) {
+            if source != key || is_pattern(&source) {
                 for record in &mut values {
                     record.name = owner.clone();
                 }
@@ -431,90 +514,7 @@ impl Store {
     }
 }
 
-pub(crate) fn has_wildcard(name: &Name) -> bool {
-    name.iter().any(|label| label == b"*" || label == b"**")
-}
-
-/// Reverse-label trie, rebuilt from LMDB keys only when its revision changes.
-#[derive(Default)]
-struct Wildcards {
-    children: BTreeMap<Vec<u8>, Wildcards>,
-    pattern: Option<WildcardPattern>,
-}
-
-struct WildcardPattern {
-    key: String,
-    rank: (usize, usize, Vec<u8>),
-}
-
-impl Wildcards {
-    fn insert(&mut self, name: &Name, key: &str) {
-        let rank: Vec<_> = name
-            .iter()
-            .rev()
-            .map(|label| match label {
-                b"**" => 0,
-                b"*" => 1,
-                _ => 2,
-            })
-            .collect();
-        let fixed = rank.iter().filter(|&&v| v == 2).count();
-        let single = rank.iter().filter(|&&v| v == 1).count();
-        let mut node = self;
-        for label in name.iter().rev() {
-            node = node.children.entry(label.to_vec()).or_default();
-        }
-        node.pattern = Some(WildcardPattern {
-            key: key.into(),
-            rank: (fixed, single, rank),
-        });
-    }
-
-    fn find(&self, name: &Name) -> Option<String> {
-        let labels: Vec<_> = name.iter().rev().collect();
-        let mut best = None;
-        let mut visited = std::collections::HashSet::new();
-        self.search(&labels, &mut visited, &mut best);
-        best.map(|pattern| pattern.key.clone())
-    }
-
-    fn search<'a>(
-        &'a self,
-        labels: &[&[u8]],
-        visited: &mut std::collections::HashSet<(usize, usize)>,
-        best: &mut Option<&'a WildcardPattern>,
-    ) {
-        // Repeated ** must not revisit every possible partition of the labels.
-        if !visited.insert((self as *const Self as usize, labels.len())) {
-            return;
-        }
-        let Some((label, rest)) = labels.split_first() else {
-            if let Some(pattern) = &self.pattern
-                && best.is_none_or(|old| {
-                    pattern.rank > old.rank || (pattern.rank == old.rank && pattern.key < old.key)
-                })
-            {
-                *best = Some(pattern);
-            }
-            return;
-        };
-        if *label != b"*"
-            && *label != b"**"
-            && let Some(child) = self.children.get(*label)
-        {
-            child.search(rest, visited, best);
-        }
-        if let Some(child) = self.children.get(b"*".as_slice()) {
-            child.search(rest, visited, best);
-        }
-        if let Some(child) = self.children.get(b"**".as_slice()) {
-            // ** consumes at least one complete label, never zero labels.
-            for consumed in 1..=labels.len() {
-                child.search(&labels[consumed..], visited, best);
-            }
-        }
-    }
-}
+type Patterns = Vec<(usize, String, regex::Regex)>;
 
 fn decode(key: &str, bytes: &[u8]) -> Result<Vec<Record>> {
     if let Some(wire) = bytes.strip_prefix(b"DNS1") {
