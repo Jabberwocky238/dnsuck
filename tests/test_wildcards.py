@@ -4,7 +4,6 @@ import os
 import subprocess
 import unittest
 
-import dns.asyncquery
 import dns.dnssec
 import dns.flags
 import dns.message
@@ -15,7 +14,7 @@ import dns.rdatatype
 import dns.rrset
 
 from fixtures import inputs, record
-from support import ROOT, Server
+from support import quic_query, ROOT, Server
 
 
 class WildcardTests(unittest.TestCase):
@@ -38,7 +37,7 @@ class WildcardTests(unittest.TestCase):
             return dns.query.tls(query, "127.0.0.1", port=self.server.dot_port, timeout=5,
                 verify=str(self.server.cert), server_hostname="localhost")
         if transport == "doq":
-            return asyncio.run(dns.asyncquery.quic(query, "127.0.0.1", port=self.server.doq_port, timeout=5,
+            return asyncio.run(quic_query(query, "127.0.0.1", port=self.server.doq_port, timeout=5,
                 verify=str(self.server.cert), server_hostname="localhost"))
         return (dns.query.tcp if transport == "tcp" else dns.query.udp)(query, "127.0.0.1", port=self.server.port, timeout=5)
 

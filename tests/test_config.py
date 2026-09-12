@@ -6,11 +6,10 @@ import subprocess
 import time
 import unittest
 
-import dns.asyncquery
 import dns.message
 import dns.query
 
-from support import Server, ROOT, available_port
+from support import quic_query, Server, ROOT, available_port
 
 
 class ConfigTests(unittest.TestCase):
@@ -80,7 +79,7 @@ class ConfigTests(unittest.TestCase):
                                 reply = dns.query.tls(message, "127.0.0.1", port=port, timeout=0.3,
                                     verify=str(server.cert), server_hostname="localhost")
                             else:
-                                reply = asyncio.run(dns.asyncquery.quic(message, "127.0.0.1", port=port,
+                                reply = asyncio.run(quic_query(message, "127.0.0.1", port=port,
                                     timeout=0.3, verify=str(server.cert), server_hostname="localhost"))
                             break
                         except Exception:

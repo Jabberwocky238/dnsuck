@@ -1,6 +1,5 @@
 import unittest
 import asyncio
-import dns.asyncquery
 import dns.dnssec
 import dns.flags
 import dns.message
@@ -9,7 +8,7 @@ import dns.query
 import dns.rcode
 import dns.rdatatype
 import dns.rrset
-from support import Server
+from support import quic_query, Server
 from fixtures import record
 
 
@@ -29,7 +28,7 @@ class DNSSECTests(unittest.TestCase):
             return dns.query.tls(message, "127.0.0.1", port=self.server.dot_port, timeout=5,
                                  server_hostname="localhost", verify=str(self.server.cert))
         if transport == "doq":
-            return asyncio.run(dns.asyncquery.quic(message, "127.0.0.1", port=self.server.doq_port, timeout=5,
+            return asyncio.run(quic_query(message, "127.0.0.1", port=self.server.doq_port, timeout=5,
                                   server_hostname="localhost", verify=str(self.server.cert)))
         if transport == "doh":
             result = self.server.client.post(self.server.url + "/dns-query", content=message.to_wire(),

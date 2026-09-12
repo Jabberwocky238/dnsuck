@@ -4,8 +4,6 @@ import socket
 import ssl
 
 import asyncio
-import dns.asyncquery
-import dns.quic
 from dns.quic._common import UnexpectedEOF
 import dns.exception
 import dns.flags
@@ -14,7 +12,7 @@ import dns.query
 import dns.rcode
 
 from fixtures import expected_rrsets, inputs, record, write
-from support import Server
+from support import quic_query, Server
 
 
 class EncryptedDNSTests:
@@ -32,7 +30,7 @@ class EncryptedDNSTests:
             response = dns.query.tls(message, "127.0.0.1", port=self.server.dot_port,
                 timeout=2, server_hostname=hostname, verify=verify)
         else:
-            response = asyncio.run(dns.asyncquery.quic(message, "127.0.0.1", port=self.server.doq_port,
+            response = asyncio.run(quic_query(message, "127.0.0.1", port=self.server.doq_port,
                 timeout=2, server_hostname=hostname, verify=verify))
             self.assertEqual(response.id, 0)
         self.assertEqual(response.question, message.question)
@@ -73,7 +71,11 @@ class EncryptedDNSTests:
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             replies = list(executor.map(lambda _: self.query("example.test", "A"), range(12)))
         self.assertTrue(all(r.answer[0][0].address == "192.0.2.10" for r in replies))
-        self.server.upsert([record("large.test", "TXT", f'"{i}{"x" * 200}"') for i in range(6)])
-        reply = self.query("large.test", "TXT")
-        self.assertFalse(reply.flags & dns.flags.TC)
-        self.assertEqual(len(reply.answer[0]), 6)
+        for count in (6, 60, 250):
+            with self.subTest(records=count):
+                values = [f'"{i}{"x" * 200}"' for i in range(count)]
+                self.server.upsert([record("large.test", "TXT", value) for value in values])
+                reply = self.query("large.test", "TXT")
+                self.assertFalse(reply.flags & dns.flags.TC)
+                self.assertGreater(len(reply.to_wire()), 1200)
+                self.assertEqual({r.to_text() for r in reply.answer[0]}, set(values))

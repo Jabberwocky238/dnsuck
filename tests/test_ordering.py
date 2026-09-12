@@ -3,7 +3,6 @@ import asyncio
 import concurrent.futures
 import unittest
 
-import dns.asyncquery
 import dns.dnssec
 import dns.message
 import dns.name
@@ -12,7 +11,7 @@ import dns.rdatatype
 import dns.rrset
 
 from fixtures import record
-from support import ROOT, Server
+from support import quic_query, ROOT, Server
 
 
 class OrderingTests(unittest.TestCase):
@@ -41,7 +40,7 @@ class OrderingTests(unittest.TestCase):
             return dns.query.tls(query, "127.0.0.1", port=self.server.dot_port, timeout=3,
                 verify=str(self.server.cert), server_hostname="localhost")
         if transport == "doq":
-            return asyncio.run(dns.asyncquery.quic(query, "127.0.0.1", port=self.server.doq_port, timeout=3,
+            return asyncio.run(quic_query(query, "127.0.0.1", port=self.server.doq_port, timeout=3,
                 verify=str(self.server.cert), server_hostname="localhost"))
         response = self.server.client.post(self.server.url + "/dns-query", content=query.to_wire(),
             headers={"content-type":"application/dns-message"})

@@ -147,3 +147,46 @@ class Server:
         if "errors" in payload:
             raise AssertionError(payload)
         return payload["data"]["upsert"]
+
+
+def quic_connection(address, port=853, verify=True, server_hostname=None):
+    from aioquic.asyncio import connect
+    from aioquic.quic.configuration import QuicConfiguration
+    config = QuicConfiguration(is_client=True, alpn_protocols=["doq"],
+                               server_name=server_hostname or address)
+    if verify is False:
+        config.verify_mode = ssl.CERT_NONE
+    elif verify is not True:
+        config.load_verify_locations(cafile=os.fspath(verify))
+    return connect(address, port, configuration=config)
+
+
+async def quic_query(message, address, port=853, timeout=3, verify=True,
+                     server_hostname=None, connection=None):
+    """Use aioquic streams: dnspython 2.8's Condition wait can lose a wakeup on 3.10."""
+    import asyncio
+    import dns.message
+    import dns.query
+    message.id = 0
+    wire = message.to_wire()
+
+    async def exchange(protocol):
+        reader, writer = await protocol.create_stream()
+        try:
+            writer.write(len(wire).to_bytes(2, "big") + wire)
+            writer.write_eof()
+            size = int.from_bytes(await reader.readexactly(2), "big")
+            response = dns.message.from_wire(await reader.readexactly(size))
+            if await reader.read(1) or not message.is_response(response):
+                raise dns.query.BadResponse
+            return response
+        finally:
+            writer.close()
+
+    async def run():
+        if connection is not None:
+            return await exchange(connection)
+        async with quic_connection(address, port, verify, server_hostname) as protocol:
+            return await exchange(protocol)
+
+    return await asyncio.wait_for(run(), timeout)
