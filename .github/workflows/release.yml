@@ -8,10 +8,7 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yaml
   build:
-    needs: ci
     strategy:
       fail-fast: false
       matrix:
