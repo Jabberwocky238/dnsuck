@@ -72,6 +72,36 @@ class WildcardTests(unittest.TestCase):
                 self.validate(response.authority)
                 self.assertTrue(all(r.ttl == 0 for r in response.authority if r.rdtype == dns.rdatatype.NSEC))
 
+    def test_dynamic_addresses_all_transports_and_signatures(self):
+        for suffix in ("tinfra.cc", "dynamic.secure.test"):
+            pattern = r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)." + suffix
+            self.server.upsert([record(pattern, "A", "{0}")])
+            result = self.server.graphql("query($name:String!){records(name:$name){data}}", {"name": pattern}).json()
+            self.assertEqual(result["data"]["records"][0]["data"], "{0}")
+            for transport in ("udp", "tcp", "doh", "dot", "doq"):
+                self.address("192.0.2.42." + suffix, ["192.0.2.42"], transport, suffix.endswith("secure.test"))
+                self.assertEqual(self.query("999.0.2.42." + suffix, transport=transport).rcode(), dns.rcode.SERVFAIL)
+            response = self.query("192.0.2.42." + suffix, "MX")
+            self.assertEqual(response.rcode(), dns.rcode.NOERROR)
+            self.assertFalse(response.answer)
+            if suffix.endswith("secure.test"):
+                self.validate(response.authority)
+
+    def test_dynamic_cname_and_atomic_validation(self):
+        self.server.upsert([
+            record("*.capture-alias.secure.test", "CNAME", "{0}.capture-target.secure.test."),
+            record("([0-9]+).capture-target.secure.test", "A", "192.0.2.{0}"),
+        ])
+        response = self.query("42.capture-alias.secure.test")
+        self.assertEqual(response.rcode(), dns.rcode.NOERROR)
+        self.assertEqual(response.answer[0][0].target, dns.name.from_text("42.capture-target.secure.test."))
+        self.assertEqual(next(r for r in response.answer if r.rdtype == dns.rdatatype.A)[0].address, "192.0.2.42")
+        self.validate(response.answer)
+        result = self.server.graphql("mutation($r:[RecordInput!]!){upsert(records:$r)}", {
+            "r": [record("atomic.capture.test", "A", "192.0.2.1"), record("*.invalid-capture.test", "A", "{1}")]})
+        self.assertIn("errors", result.json())
+        self.assertEqual(self.query("atomic.capture.test").rcode(), dns.rcode.NXDOMAIN)
+
     def test_star_is_one_layer_and_regex_covers_multiple_layers(self):
         self.server.upsert([
             record("*.df.(.+).star.test", "A", "192.0.2.1"),
@@ -171,6 +201,23 @@ class WildcardTests(unittest.TestCase):
         self.address("a.cli.b.c.crud.test", ["192.0.2.3"])
         cli("batch", "--item", 'put,"([a-z]{1,3}).batch.regex.test",A,192.0.2.4')
         self.address("abc.batch.regex.test", ["192.0.2.4"])
+
+    @unittest.skipUnless(os.environ.get("DNS_TEST_CLI"), "requires built CLI")
+    def test_dynamic_cli_crud_and_restart(self):
+        pattern = "([0-9]+).([0-9]+).dynamic-cli.test"
+        def cli(*args):
+            return subprocess.run([os.environ["DNS_TEST_CLI"], "--endpoint", self.server.graphql_url + "/graphql", *args],
+                text=True, capture_output=True, check=True)
+        cli("put", pattern, "A", "192.0.{1}.{0}")
+        cli("add", pattern, "A", "192.0.{0}.{1}")
+        self.assertIn("192.0.{1}.{0}", cli("get", pattern, "A").stdout)
+        self.address("42.2.dynamic-cli.test", ["192.0.2.42", "192.0.42.2"])
+        cli("del", pattern, "A", "192.0.{0}.{1}")
+        self.server.stop()
+        self.server.start()
+        self.address("42.2.dynamic-cli.test", ["192.0.2.42"])
+        cli("del", pattern, "A")
+        self.assertEqual(self.query("42.2.dynamic-cli.test").rcode(), dns.rcode.NXDOMAIN)
 
     def test_invalid_patterns_rollback_entire_batch(self):
         for pattern in ("**.removed.test", "([a-z).bad.test", "(?=a).bad.test", r"((a)\1).bad.test",

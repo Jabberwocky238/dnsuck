@@ -61,6 +61,7 @@ dnsuck add app.test A 192.0.2.21 --mode lb
 dnsuck put app.test AAAA 2001:db8::20 --ttl 60
 dnsuck put app.test TXT '"hello world"'
 dnsuck put '([a-z]+).jjj.([0-9]+).fff.*.exp.com' A 192.0.2.30
+dnsuck put '([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).tinfra.cc' A '{0}'
 dnsuck get app.test A
 dnsuck del app.test A 192.0.2.20
 dnsuck batch --item "put,app.test,A,192.0.2.20" --item "get,app.test,A"
@@ -76,13 +77,13 @@ Local writes: `dnsuckd put NAME IP [TTL]`, `dnsuckd record NAME TYPE VALUE`, or 
 
 ## LMDB and DNSSEC
 
-LMDB is the only record store; no zone files. `records` keys are canonical exact names or pattern strings (literal labels lowercase; regex case/escapes preserved). Values remain `DNS1` plus a Hickory wire message; pattern values use a root owner placeholder, replaced by the queried name in responses. Add appends distinct values; put replaces supplied RRsets. Deletes remove one value, a type, or a name. Batches commit atomically with `metadata[revision]` (big-endian u64); modes use `metadata[mode:TYPE:NAME]`. Compiled patterns and lb cursors live in memory.
+LMDB is the only record store; no zone files. `records` keys are canonical exact names or pattern strings (literal labels lowercase; regex case/escapes preserved). Static values use `DNS1` plus a Hickory wire message; owners with dynamic RDATA use `DNS2` JSON entries containing templates or wire messages; pattern values use a root owner placeholder, replaced by the queried name in responses. Add appends distinct values; put replaces supplied RRsets. Deletes remove one value, a type, or a name. Batches commit atomically with `metadata[revision]` (big-endian u64); modes use `metadata[mode:TYPE:NAME]`. Compiled patterns and lb cursors live in memory.
 
-Use `*` for exactly one label (equivalent to `([^.]+)`), `(.+)` for one or more layers, or other parenthesized [Rust regex](https://docs.rs/regex/latest/regex/#syntax) segments anywhere. Matching covers the whole name, without its trailing dot, and ignores case by default; dots outside groups are literal. Exact names win, then patterns with more literal labels, then alphabetical keys. Type misses never fall back. Invalid regex rejects the whole write. `**` is unsupported; use `(.+)` instead. No legacy-data migration is provided.
+Use `*` for exactly one label (equivalent to `([^.]+)`), `(.+)` for one or more layers, or other parenthesized [Rust regex](https://docs.rs/regex/latest/regex/#syntax) segments anywhere. Matching covers the whole name, without its trailing dot, and ignores case by default; dots outside groups are literal. Exact names win, then patterns with more literal labels, then alphabetical keys. Type misses never fall back. Invalid regex rejects the whole write. `**` is unsupported; use `(.+)` instead. No legacy-data migration is provided. Pattern RDATA supports `{0}`, `{1}`, … for capturing groups in opening-parenthesis order (zero-based, excluding the whole match). Nested captures and `*` count; `(?:...)` does not. For example, the command above maps `192.0.2.42.tinfra.cc` to `192.0.2.42`; `([0-9]+).([0-9]+).parts.test` with A `192.0.{1}.{0}` maps `42.2.parts.test` to `192.0.2.42`. Text RDATA types such as AAAA, CNAME, MX and TXT also support substitution; raw base64 is unchanged. Captures use the canonical lowercase query. Out-of-range indices reject the write; unmatched optional captures or invalid expanded RDATA return SERVFAIL. Exact-name text is literal. Templates persist and are returned unchanged by `get`.
 
 DNSSEC uses `--dnssec-zone DOMAIN --dnssec-key-file PATH` with an ECDSA P-256 PKCS#8 PEM key. Apex SOA/NS records must exist in LMDB. Hickory generates signatures and negative-answer proofs; public trust requires a parent DS record. Regex patterns extend [standard wildcard semantics](https://www.rfc-editor.org/rfc/rfc4592.html): concrete owners are signed on demand, and servers with patterns use zero negative-cache TTL to prevent cached denial proofs hiding other matches.
 
-[CI](.github/workflows/ci.yaml) checks every push on Linux x86-64 and ARM64. Pushing a tag such as `v0.1.0` runs the same checks before [publishing binaries](.github/workflows/release.yml).
+[CI](.github/workflows/ci.yaml) checks branch pushes on Linux x86-64 and ARM64. Tags run zero CI checks, directly [publishing binaries](.github/workflows/release.yml).
 
 ## Debug
 

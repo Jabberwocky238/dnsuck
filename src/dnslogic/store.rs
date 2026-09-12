@@ -56,6 +56,7 @@ impl Store {
         };
         self.put_records(vec![StoredRecord {
             key,
+            template: None,
             record: Record::from_rdata(owner, ttl, data),
         }])?;
         Ok(())
@@ -80,10 +81,11 @@ impl Store {
         let count = records.len();
         let mut added = 0;
         let mut changed = false;
-        let mut groups: BTreeMap<String, Vec<Record>> = BTreeMap::new();
+        let mut groups: BTreeMap<String, Vec<StoredRecord>> = BTreeMap::new();
         for input in records {
             let key = canonical(&input.key)?;
-            let mut record = input.record;
+            let mut record = input;
+            record.key = key.clone();
             record.name = if is_pattern(&key) {
                 Name::root()
             } else {
@@ -160,10 +162,7 @@ impl Store {
                 }
             }
             changed = true;
-            let mut message = Message::new(0, MessageType::Response, OpCode::Query);
-            message.answers = values;
-            let mut bytes = b"DNS1".to_vec();
-            bytes.extend(message.to_vec()?);
+            let bytes = encode(&values)?;
             txn.put(self.db, &key, &bytes, WriteFlags::empty())?;
         }
         if changed {
@@ -225,10 +224,7 @@ impl Store {
         let mut records = Vec::new();
         for (key, bytes) in cursor.iter() {
             let key = std::str::from_utf8(key)?;
-            records.extend(decode(key, bytes)?.into_iter().map(|record| StoredRecord {
-                key: key.into(),
-                record,
-            }));
+            records.extend(decode(key, bytes)?);
         }
         Ok((revision, records))
     }
@@ -237,13 +233,7 @@ impl Store {
         let key = canonical(name)?;
         let txn = self.env.begin_ro_txn()?;
         match txn.get(self.db, &key) {
-            Ok(bytes) => Ok(decode(&key, bytes)?
-                .into_iter()
-                .map(|record| StoredRecord {
-                    key: key.clone(),
-                    record,
-                })
-                .collect()),
+            Ok(bytes) => decode(&key, bytes),
             Err(lmdb::Error::NotFound) => Ok(Vec::new()),
             Err(error) => Err(error.into()),
         }
@@ -275,14 +265,14 @@ impl Store {
     }
 
     pub fn delete_record(&self, record: &StoredRecord) -> Result<usize> {
-        self.delete_matching(&record.key, Some(record.record_type()), Some(&record.data))
+        self.delete_matching(&record.key, Some(record.record_type()), Some(record))
     }
 
     fn delete_matching(
         &self,
         name: &str,
         kind: Option<RecordType>,
-        data: Option<&RData>,
+        data: Option<&StoredRecord>,
     ) -> Result<usize> {
         let key = canonical(name)?;
         let mut txn = self.env.begin_rw_txn()?;
@@ -299,7 +289,9 @@ impl Store {
         let before = records.len();
         records.retain(|record| {
             kind.is_some_and(|kind| record.record_type() != kind)
-                || data.is_some_and(|data| &record.data != data)
+                || data.is_some_and(|data| {
+                    record.template != data.template || record.data != data.data
+                })
         });
         let deleted = before - records.len();
         if deleted == 0 {
@@ -317,10 +309,7 @@ impl Store {
         if records.is_empty() {
             txn.del(self.db, &key, None)?;
         } else {
-            let mut message = Message::new(0, MessageType::Response, OpCode::Query);
-            message.answers = records;
-            let mut bytes = b"DNS1".to_vec();
-            bytes.extend(message.to_vec()?);
+            let bytes = encode(&records)?;
             txn.put(self.db, &key, &bytes, WriteFlags::empty())?;
         }
         self.bump_revision(&mut txn)?;
@@ -329,9 +318,14 @@ impl Store {
     }
 
     /// Exact owners win. Regex patterns are compiled once per LMDB revision.
-    fn source_in(&self, txn: &impl Transaction, key: &str) -> Result<Option<String>> {
+    fn source_in(&self, txn: &impl Transaction, key: &str) -> Result<Option<Source>> {
         match txn.get(self.db, &key) {
-            Ok(_) => return Ok(Some(key.into())),
+            Ok(_) => {
+                return Ok(Some(Source {
+                    key: key.into(),
+                    regex: None,
+                }));
+            }
             Err(lmdb::Error::NotFound) => {}
             Err(error) => return Err(error.into()),
         }
@@ -363,7 +357,10 @@ impl Store {
             .1
             .iter()
             .find(|(_, _, regex)| regex.is_match(name))
-            .map(|(_, key, _)| key.clone()))
+            .map(|(_, key, regex)| Source {
+                key: key.clone(),
+                regex: Some(regex.clone()),
+            }))
     }
 
     pub(crate) fn sources(&self, records: &[Record]) -> Result<BTreeMap<String, String>> {
@@ -374,7 +371,7 @@ impl Store {
             if !sources.contains_key(&key)
                 && let Some(source) = self.source_in(&txn, &key)?
             {
-                sources.insert(key, source);
+                sources.insert(key, source.key);
             }
         }
         Ok(sources)
@@ -426,15 +423,22 @@ impl Store {
                     synthesized,
                 ));
             };
-            let mut values = decode(&source, txn.get(self.db, &source)?)?;
+            let stored = decode(&source.key, txn.get(self.db, &source.key)?)?;
             let owner = parse_name(&key)?;
-            if source != key || is_pattern(&source) {
-                for record in &mut values {
-                    record.name = owner.clone();
-                }
+            let values: Vec<Record> = if let Some(regex) = source.regex {
+                let captures = regex
+                    .captures(key.strip_suffix('.').unwrap_or(&key))
+                    .context("pattern no longer matches query")?;
+                let values = stored
+                    .iter()
+                    .map(|record| record.materialize(&owner, &captures))
+                    .collect::<Result<Vec<_>>>()?;
                 // Include every type for correct signed NODATA proofs.
                 synthesized.extend(values.iter().cloned());
-            }
+                values
+            } else {
+                stored.into_iter().map(|record| record.record).collect()
+            };
             let matching: Vec<_> = values
                 .iter()
                 .filter(|r| kind == RecordType::ANY || r.record_type() == kind)
@@ -459,7 +463,90 @@ impl Store {
 
 type Patterns = Vec<(usize, String, regex::Regex)>;
 
-fn decode(key: &str, bytes: &[u8]) -> Result<Vec<Record>> {
+struct Source {
+    key: String,
+    regex: Option<regex::Regex>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum StoredValue {
+    Wire(Vec<u8>),
+    Template { kind: u16, ttl: u32, text: String },
+}
+
+fn wire(records: impl IntoIterator<Item = Record>) -> Result<Vec<u8>> {
+    let mut message = Message::new(0, MessageType::Response, OpCode::Query);
+    message.answers = records.into_iter().collect();
+    Ok(message.to_vec()?)
+}
+
+fn encode(records: &[StoredRecord]) -> Result<Vec<u8>> {
+    if records.iter().any(|record| record.template.is_some()) {
+        let values = records
+            .iter()
+            .map(|record| {
+                Ok(match &record.template {
+                    Some(text) => StoredValue::Template {
+                        kind: u16::from(record.record_type()),
+                        ttl: record.ttl,
+                        text: text.clone(),
+                    },
+                    None => StoredValue::Wire(wire([record.record.clone()])?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut bytes = b"DNS2".to_vec();
+        bytes.extend(serde_json::to_vec(&values)?);
+        return Ok(bytes);
+    }
+    let mut bytes = b"DNS1".to_vec();
+    bytes.extend(wire(records.iter().map(|record| record.record.clone()))?);
+    Ok(bytes)
+}
+
+fn decode(key: &str, bytes: &[u8]) -> Result<Vec<StoredRecord>> {
+    if let Some(json) = bytes.strip_prefix(b"DNS2") {
+        let values: Vec<StoredValue> = serde_json::from_slice(json)?;
+        return values
+            .into_iter()
+            .map(|value| {
+                let (record, template) = match value {
+                    StoredValue::Wire(bytes) => {
+                        let mut message = Message::from_vec(&bytes)?;
+                        anyhow::ensure!(message.answers.len() == 1, "invalid stored record");
+                        (message.answers.remove(0), None)
+                    }
+                    StoredValue::Template { kind, ttl, text } => (
+                        Record::from_rdata(
+                            Name::root(),
+                            ttl,
+                            RData::Unknown {
+                                code: RecordType::from(kind),
+                                rdata: hickory_server::proto::rr::rdata::NULL::new(),
+                            },
+                        ),
+                        Some(text),
+                    ),
+                };
+                Ok(StoredRecord {
+                    key: key.into(),
+                    record,
+                    template,
+                })
+            })
+            .collect();
+    }
+    Ok(decode_static(key, bytes)?
+        .into_iter()
+        .map(|record| StoredRecord {
+            key: key.into(),
+            record,
+            template: None,
+        })
+        .collect())
+}
+
+fn decode_static(key: &str, bytes: &[u8]) -> Result<Vec<Record>> {
     if let Some(wire) = bytes.strip_prefix(b"DNS1") {
         return Ok(Message::from_vec(wire)?.answers);
     }

@@ -31,7 +31,10 @@ impl From<crate::dnslogic::records::StoredRecord> for DnsRecord {
             record_type: domain::base::iana::Rtype::from(u16::from(record.record_type()))
                 .to_string(),
             ttl: record.ttl,
-            data: record.data.to_string(),
+            data: record
+                .template
+                .clone()
+                .unwrap_or_else(|| record.data.to_string()),
             mode: None,
         }
     }

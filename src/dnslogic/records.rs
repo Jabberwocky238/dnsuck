@@ -18,15 +18,63 @@ pub struct RecordInput {
     pub rdata_base64: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoredRecord {
     pub key: String,
     pub record: Record,
+    pub template: Option<String>,
 }
 impl std::ops::Deref for StoredRecord {
     type Target = Record;
     fn deref(&self) -> &Record {
         &self.record
+    }
+}
+
+impl std::ops::DerefMut for StoredRecord {
+    fn deref_mut(&mut self) -> &mut Record {
+        &mut self.record
+    }
+}
+
+fn placeholders() -> &'static regex::Regex {
+    static PLACEHOLDERS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PLACEHOLDERS.get_or_init(|| regex::Regex::new(r"\{([0-9]+)\}").unwrap())
+}
+
+impl StoredRecord {
+    pub(crate) fn materialize(
+        &self,
+        owner: &Name,
+        captures: &regex::Captures<'_>,
+    ) -> Result<Record> {
+        let Some(template) = &self.template else {
+            let mut record = self.record.clone();
+            record.name = owner.clone();
+            return Ok(record);
+        };
+        let mut text = String::new();
+        let mut end = 0;
+        for placeholder in placeholders().captures_iter(template) {
+            let span = placeholder.get(0).unwrap();
+            text.push_str(&template[end..span.start()]);
+            let index: usize = placeholder[1].parse()?;
+            let value = captures
+                .get(index + 1)
+                .context("template capture did not participate in match")?;
+            text.push_str(value.as_str());
+            end = span.end();
+        }
+        text.push_str(&template[end..]);
+        // Parse the expanded text as ordinary RDATA; never interpret it as another template.
+        let record = RecordInput {
+            name: owner.to_ascii(),
+            record_type: format!("TYPE{}", u16::from(self.record_type())),
+            ttl: self.ttl,
+            data: Some(text),
+            rdata_base64: None,
+        };
+        Ok(record.into_static_record()?.record)
     }
 }
 
@@ -130,6 +178,44 @@ pub fn record_type(value: &str) -> Result<RecordType> {
 
 impl RecordInput {
     pub fn into_record(self) -> Result<StoredRecord> {
+        if let Some(text) = &self.data
+            && placeholders().is_match(text)
+            && is_pattern(&self.name)
+        {
+            anyhow::ensure!(
+                self.rdata_base64.is_none(),
+                "supply exactly one of data or rdataBase64"
+            );
+            let (key, regex, _) = pattern(&self.name)?;
+            for capture in placeholders().captures_iter(text) {
+                let index: usize = capture[1].parse().context("invalid capture index")?;
+                anyhow::ensure!(
+                    index < regex.captures_len() - 1,
+                    "capture index {{{index}}} out of range"
+                );
+            }
+            let kind = record_type(&self.record_type)?;
+            anyhow::ensure!(
+                !matches!(u16::from(kind), 0 | 41 | 249..=255),
+                "query/pseudo types cannot be stored"
+            );
+            return Ok(StoredRecord {
+                key,
+                record: Record::from_rdata(
+                    Name::root(),
+                    self.ttl,
+                    RData::Unknown {
+                        code: kind,
+                        rdata: NULL::new(),
+                    },
+                ),
+                template: self.data,
+            });
+        }
+        self.into_static_record()
+    }
+
+    fn into_static_record(self) -> Result<StoredRecord> {
         let kind = record_type(&self.record_type)?;
         anyhow::ensure!(
             !matches!(u16::from(kind), 0 | 41 | 249..=255),
@@ -169,6 +255,7 @@ impl RecordInput {
         // Let Hickory validate binary RDATA for known types before any LMDB write.
         Ok(StoredRecord {
             key,
+            template: None,
             record: Message::from_vec(&message.to_vec()?)?.answers.remove(0),
         })
     }

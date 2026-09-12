@@ -242,3 +242,114 @@ fn star_is_single_layer_and_double_star_is_replaced_by_regex() -> anyhow::Result
     assert_eq!(store.names("*.", "", 10)?, vec!["*.deep.test."]);
     Ok(())
 }
+
+#[test]
+fn dynamic_addresses_persist_and_support_crud() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pattern = r"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).tinfra.cc";
+    let dynamic = || input(pattern, "A", "{0}").into_record();
+    {
+        let store = Store::open(dir.path())?;
+        assert_eq!(store.add_records(vec![dynamic()?])?, 1);
+        assert_eq!(store.add_records(vec![dynamic()?])?, 0);
+        store.add_records(dnsuck::decode_inputs(vec![
+            input(pattern, "A", "192.0.2.99"),
+            input(pattern, "TXT", "\"static\""),
+        ])?)?;
+    }
+    let store = Store::open(dir.path())?;
+    let query = "192.0.2.42.tinfra.cc";
+    let answers = store.lookup(query, RecordType::A)?.unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].data.to_string(), "192.0.2.42");
+    assert_eq!(answers[0].name.to_ascii(), format!("{query}."));
+    assert_eq!(answers[0].ttl, 60);
+    assert_eq!(store.records(pattern)?[0].template.as_deref(), Some("{0}"));
+    assert!(store.lookup("999.0.2.42.tinfra.cc", RecordType::A).is_err());
+    store.put(query, "2001:db8::1".parse()?, 60)?;
+    assert!(store.lookup(query, RecordType::A)?.unwrap().is_empty());
+    store.delete(query, None)?;
+    assert_eq!(store.delete_record(&dynamic()?)?, 1);
+    assert_eq!(
+        store.lookup(query, RecordType::A)?.unwrap()[0]
+            .data
+            .to_string(),
+        "192.0.2.99"
+    );
+    store.put_records(vec![dynamic()?])?;
+    assert_eq!(
+        store.lookup(query, RecordType::A)?.unwrap()[0]
+            .data
+            .to_string(),
+        "192.0.2.42"
+    );
+    assert_eq!(store.lookup(query, RecordType::TXT)?.unwrap().len(), 1);
+    store.delete(pattern, None)?;
+    assert!(store.lookup(query, RecordType::A)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn dynamic_capture_numbering_and_rdata_types() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    store.put_records(dnsuck::decode_inputs(vec![
+        input("([0-9]+).([0-9]+).parts.test", "A", "192.0.{1}.{0}"),
+        input("([0-9a-f]+).v6.test", "AAAA", "2001:db8::{0}"),
+        input("*.alias.test", "CNAME", "{0}.v6.test."),
+        input("((ab)(?:cd)).*.nested.test", "TXT", "\"{0}/{1}/{2}/{0}\""),
+        input("*.mail.test", "MX", "10 {0}.example.test."),
+        input("literal.test", "TXT", "\"{0}\""),
+    ])?)?;
+    assert_eq!(
+        store.lookup("42.2.parts.test", RecordType::A)?.unwrap()[0]
+            .data
+            .to_string(),
+        "192.0.2.42"
+    );
+    let answers = store.lookup("ff.alias.test", RecordType::AAAA)?.unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].data.to_string(), "ff.v6.test.");
+    assert_eq!(answers[1].data.to_string(), "2001:db8::ff");
+    let nested = store
+        .lookup("abcd.xyz.nested.test", RecordType::TXT)?
+        .unwrap();
+    assert!(
+        matches!(&nested[0].data, RData::TXT(txt) if txt.txt_data[0].as_ref() == b"abcd/ab/xyz/abcd")
+    );
+    assert_eq!(
+        store.lookup("mx.mail.test", RecordType::MX)?.unwrap()[0]
+            .data
+            .to_string(),
+        "10 mx.example.test."
+    );
+    assert!(
+        matches!(&store.lookup("literal.test", RecordType::TXT)?.unwrap()[0].data, RData::TXT(txt) if txt.txt_data[0].as_ref() == b"{0}")
+    );
+    Ok(())
+}
+
+#[test]
+fn dynamic_invalid_references_and_optional_captures() -> anyhow::Result<()> {
+    for (pattern, template) in [
+        ("*.test", "{1}"),
+        ("(?:abc).test", "{0}"),
+        ("*.test", "{99999999999999999999999999999999999}"),
+    ] {
+        assert!(input(pattern, "A", template).into_record().is_err());
+    }
+    let dir = tempfile::tempdir()?;
+    let store = Store::open(dir.path())?;
+    store.put_records(dnsuck::decode_inputs(vec![
+        input("((1)?2).optional.test", "A", "192.0.2.{1}"),
+        input("(.+).optional.test", "A", "192.0.2.99"),
+    ])?)?;
+    assert_eq!(
+        store.lookup("12.optional.test", RecordType::A)?.unwrap()[0]
+            .data
+            .to_string(),
+        "192.0.2.1"
+    );
+    assert!(store.lookup("2.optional.test", RecordType::A).is_err());
+    Ok(())
+}
